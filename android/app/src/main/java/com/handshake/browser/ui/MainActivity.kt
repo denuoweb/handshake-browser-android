@@ -7,11 +7,16 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
+import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.ServiceWorkerController
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceRequest
@@ -21,6 +26,8 @@ import android.net.http.SslError
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.PopupMenu
+import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -35,15 +42,26 @@ import com.handshake.browser.core.HnsPageTlsPolicy
 import com.handshake.browser.core.SecurityState
 import com.handshake.browser.net.HnsProxyController
 import com.handshake.browser.net.HnsServiceWorkerGatewayClient
+import com.handshake.browser.net.HnsSyncProgress
 import com.handshake.browser.net.HnsSyncForegroundService
 import com.handshake.browser.net.HnsSyncSnapshot
 import com.handshake.browser.net.HnsWebViewGatewayInterceptor
 import com.handshake.browser.net.HnsWebViewSslErrorPolicy
 import com.handshake.browser.net.LoopbackProxyServer
 import com.handshake.browser.net.NativeBridge
+import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
     private val classifier = BrowserUrlClassifier()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val syncStatusExecutor = Executors.newSingleThreadExecutor()
+    @Volatile
+    private var syncStatusPolling: Boolean = false
+    private val syncStatusPollRunnable = object : Runnable {
+        override fun run() {
+            pollSyncStatusOnce()
+        }
+    }
     private val syncSnapshotReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != HnsSyncForegroundService.ACTION_SYNC_SNAPSHOT) {
@@ -59,11 +77,15 @@ class MainActivity : ComponentActivity() {
                 ),
             )
             refreshSecurityState()
+            refreshSyncProgress()
         }
     }
     private lateinit var webView: WebView
     private lateinit var omnibox: EditText
     private lateinit var securityLabel: TextView
+    private lateinit var syncProgressBar: ProgressBar
+    private lateinit var syncProgressStats: TextView
+    private lateinit var pageProgressBar: ProgressBar
     private lateinit var proxyController: HnsProxyController
     private lateinit var loopbackProxyServer: LoopbackProxyServer
     private lateinit var webViewGatewayInterceptor: HnsWebViewGatewayInterceptor
@@ -74,6 +96,8 @@ class MainActivity : ComponentActivity() {
     private var mainFrameHnsResolverPolicy: HnsPageResolverPolicy? = null
     private var lastSyncSnapshot: HnsSyncSnapshot? = null
     private var syncReceiverRegistered: Boolean = false
+    private var pageIsLoading: Boolean = false
+    private var pageLoadProgress: Int = 0
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -119,12 +143,28 @@ class MainActivity : ComponentActivity() {
             text = getString(R.string.security_syncing)
         }
 
+        syncProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = SYNC_PROGRESS_MAX
+            isIndeterminate = true
+        }
+        syncProgressStats = TextView(this).apply {
+            setPadding(16, 0, 16, 8)
+            setTextColor(Color.rgb(68, 68, 68))
+            text = HnsSyncProgress.fromJson(null).summary()
+        }
+        pageProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = PAGE_PROGRESS_MAX
+            progress = 0
+            visibility = View.GONE
+        }
+
         webView = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.loadsImagesAutomatically = true
             settings.mediaPlaybackRequiresUserGesture = true
             webViewClient = BrowserClient()
+            webChromeClient = BrowserChromeClient()
         }
 
         CookieManager.getInstance().setAcceptCookie(true)
@@ -132,24 +172,33 @@ class MainActivity : ComponentActivity() {
         val toolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(8, 8, 8, 8)
+            setPadding(8, 0, 8, 0)
             addView(navButton(android.R.drawable.ic_media_previous) { if (webView.canGoBack()) webView.goBack() })
             addView(navButton(android.R.drawable.ic_media_next) { if (webView.canGoForward()) webView.goForward() })
-            addView(navButton(android.R.drawable.ic_popup_sync) { webView.reload() })
             addView(omnibox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(securityLabel, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ))
-            addView(navButton(android.R.drawable.ic_menu_info_details) {
-                startActivity(Intent(this@MainActivity, DiagnosticsActivity::class.java))
-            })
+            addView(menuButton())
         }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             applySystemBarPadding()
             addView(toolbar, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(syncProgressBar, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(syncProgressStats, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(pageProgressBar, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ))
@@ -193,9 +242,12 @@ class MainActivity : ComponentActivity() {
             updatedAtMillis = System.currentTimeMillis(),
         )
         refreshSecurityState()
+        refreshSyncProgress()
+        startSyncStatusPolling()
     }
 
     override fun onStop() {
+        stopSyncStatusPolling()
         unregisterSyncSnapshotReceiver()
         super.onStop()
     }
@@ -203,6 +255,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         proxyController.clear {}
         loopbackProxyServer.close()
+        syncStatusExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -234,6 +287,39 @@ class MainActivity : ComponentActivity() {
         syncReceiverRegistered = false
     }
 
+    private fun startSyncStatusPolling() {
+        syncStatusPolling = true
+        mainHandler.removeCallbacks(syncStatusPollRunnable)
+        mainHandler.postDelayed(syncStatusPollRunnable, SYNC_STATUS_POLL_MS)
+    }
+
+    private fun stopSyncStatusPolling() {
+        syncStatusPolling = false
+        mainHandler.removeCallbacks(syncStatusPollRunnable)
+    }
+
+    private fun pollSyncStatusOnce() {
+        if (!syncStatusPolling) {
+            return
+        }
+
+        syncStatusExecutor.execute {
+            val snapshot = HnsSyncSnapshot(
+                statusJson = NativeBridge.syncStatus(filesDir.absolutePath),
+                updatedAtMillis = System.currentTimeMillis(),
+            )
+            runOnUiThread {
+                if (!syncStatusPolling) {
+                    return@runOnUiThread
+                }
+                lastSyncSnapshot = snapshot
+                refreshSecurityState()
+                refreshSyncProgress()
+                mainHandler.postDelayed(syncStatusPollRunnable, SYNC_STATUS_POLL_MS)
+            }
+        }
+    }
+
     private fun requestNotificationPermissionIfNeeded() {
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
             return
@@ -249,6 +335,37 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { action() }
         }
 
+    private fun menuButton(): TextView =
+        TextView(this).apply {
+            text = "☰"
+            textSize = 30f
+            gravity = Gravity.CENTER
+            setPadding(18, 0, 18, 0)
+            setTextColor(Color.rgb(36, 36, 36))
+            setOnClickListener { showBrowserMenu(this) }
+        }
+
+    private fun showBrowserMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add(0, MENU_REFRESH, 0, "Refresh")
+            menu.add(0, MENU_DIAGNOSTICS, 1, "Diagnostics")
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    MENU_REFRESH -> {
+                        webView.reload()
+                        true
+                    }
+                    MENU_DIAGNOSTICS -> {
+                        startActivity(Intent(this@MainActivity, DiagnosticsActivity::class.java))
+                        true
+                    }
+                    else -> false
+                }
+            }
+            show()
+        }
+    }
+
     private fun loadFromInput() {
         loadTarget(classifier.classify(omnibox.text.toString()))
     }
@@ -259,11 +376,23 @@ class MainActivity : ComponentActivity() {
         mainFrameHnsStatusCode = null
         mainFrameHnsTlsPolicy = null
         mainFrameHnsResolverPolicy = null
+        pageIsLoading = true
+        pageLoadProgress = 0
         refreshSecurityState()
+        refreshPageProgress()
         webView.loadUrl(target.url)
     }
 
     private fun refreshSecurityState() {
+        if (
+            pageIsLoading &&
+            currentTargetKind == BrowserTargetKind.HnsName &&
+            mainFrameHnsStatusCode == null
+        ) {
+            securityLabel.text = getString(R.string.security_loading)
+            return
+        }
+
         setSecurityState(
             BrowserSecurityPolicy.state(
                 targetKind = currentTargetKind,
@@ -274,6 +403,34 @@ class MainActivity : ComponentActivity() {
                 mainFrameHnsResolverPolicy = mainFrameHnsResolverPolicy,
             ),
         )
+    }
+
+    private fun refreshSyncProgress() {
+        if (!::syncProgressBar.isInitialized || !::syncProgressStats.isInitialized) {
+            return
+        }
+
+        val progress = HnsSyncProgress.fromJson(lastSyncSnapshot?.statusJson)
+        val permille = progress.progressPermille()
+        syncProgressBar.isIndeterminate = permille == null
+        if (permille != null) {
+            syncProgressBar.progress = permille
+        }
+        syncProgressStats.text = progress.summary()
+    }
+
+    private fun refreshPageProgress() {
+        if (!::pageProgressBar.isInitialized) {
+            return
+        }
+
+        if (pageIsLoading) {
+            pageProgressBar.visibility = View.VISIBLE
+            pageProgressBar.progress = pageLoadProgress.coerceIn(0, PAGE_PROGRESS_MAX)
+        } else {
+            pageProgressBar.progress = PAGE_PROGRESS_MAX
+            pageProgressBar.visibility = View.GONE
+        }
     }
 
     private fun setSecurityState(state: SecurityState) {
@@ -291,6 +448,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private inner class BrowserClient : WebViewClient() {
+        override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+            pageIsLoading = true
+            pageLoadProgress = pageLoadProgress.coerceAtLeast(5)
+            omnibox.setText(url)
+            currentTargetKind = classifier.classify(url).kind
+            mainFrameHnsStatusCode = null
+            mainFrameHnsTlsPolicy = null
+            mainFrameHnsResolverPolicy = null
+            refreshSecurityState()
+            refreshPageProgress()
+        }
+
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             val target = classifier.classify(request.url.toString())
             currentTargetKind = target.kind
@@ -317,12 +486,29 @@ class MainActivity : ComponentActivity() {
 
         override fun onPageFinished(view: WebView, url: String) {
             omnibox.setText(url)
+            pageIsLoading = false
+            pageLoadProgress = PAGE_PROGRESS_MAX
+            refreshSecurityState()
+            refreshPageProgress()
+        }
+    }
+
+    private inner class BrowserChromeClient : WebChromeClient() {
+        override fun onProgressChanged(view: WebView, newProgress: Int) {
+            pageLoadProgress = newProgress.coerceIn(0, PAGE_PROGRESS_MAX)
+            pageIsLoading = pageLoadProgress < PAGE_PROGRESS_MAX
+            refreshPageProgress()
         }
     }
 
     companion object {
         private const val DEFAULT_GATEWAY_PORT = 15353
         private const val DEFAULT_HOME = "https://handshake.org/"
+        private const val SYNC_PROGRESS_MAX = 1000
+        private const val PAGE_PROGRESS_MAX = 100
+        private const val SYNC_STATUS_POLL_MS = 2_000L
         private const val REQUEST_NOTIFICATIONS = 1002
+        private const val MENU_REFRESH = 1
+        private const val MENU_DIAGNOSTICS = 2
     }
 }

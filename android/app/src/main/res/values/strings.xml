@@ -2,6 +2,7 @@
     <string name="app_name">Handshake Browser</string>
     <string name="omnibox_hint">Search or enter HNS name</string>
     <string name="security_syncing">Syncing</string>
+    <string name="security_loading">Loading</string>
     <string name="security_hns_verified">HNS verified</string>
     <string name="security_hns_compat">HNS via DoH</string>
     <string name="security_dane_verified">DANE verified</string>

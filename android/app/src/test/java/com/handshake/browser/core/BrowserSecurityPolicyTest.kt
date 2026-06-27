@@ -44,6 +44,30 @@ class BrowserSecurityPolicyTest {
     }
 
     @Test
+    fun hnsTargetsStaySyncingWhenPeerHeightIsStillAhead() {
+        assertEquals(
+            SecurityState.Syncing,
+            BrowserSecurityPolicy.state(
+                targetKind = BrowserTargetKind.HnsName,
+                proxyAvailable = true,
+                syncStatusJson = """{"status":"synced","bestHeight":93344,"bestPeerHeight":335684}""",
+            ),
+        )
+    }
+
+    @Test
+    fun hnsTargetsStaySyncingWhenEstimatedTipIsStillAhead() {
+        assertEquals(
+            SecurityState.Syncing,
+            BrowserSecurityPolicy.state(
+                targetKind = BrowserTargetKind.HnsName,
+                proxyAvailable = true,
+                syncStatusJson = """{"status":"synced","bestHeight":92000,"bestPeerHeight":null,"estimatedTipHeight":335684}""",
+            ),
+        )
+    }
+
+    @Test
     fun mainFrameHnsGatewayFailureOverridesReadySyncState() {
         assertEquals(
             SecurityState.ValidationFailed,

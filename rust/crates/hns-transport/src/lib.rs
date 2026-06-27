@@ -516,7 +516,7 @@ fn build_http_request(request: &OriginRequest) -> Result<Vec<u8>, TransportError
     let mut out = Vec::new();
     write!(
         out,
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: hns-browser/0.1.0\r\nAccept: */*\r\n",
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: hns-browser/0.1.1\r\nAccept: */*\r\n",
         request.method.to_ascii_uppercase(),
         request.path_and_query,
         host_header(&request.host, request.port, &request.scheme),

@@ -99,10 +99,14 @@ class HnsSyncForegroundService : Service() {
 
     private fun notificationText(snapshot: HnsSyncSnapshot?): String = when {
         snapshot == null -> getString(R.string.sync_notification_starting)
-        snapshot.statusJson.contains("\"status\":\"error\"") ||
-            snapshot.statusJson.contains("\"status\":\"seed_failed\"") -> {
+        else -> notificationText(HnsSyncProgress.fromJson(snapshot.statusJson))
+    }
+
+    private fun notificationText(progress: HnsSyncProgress): String = when {
+        progress.status == "error" || progress.status == "seed_failed" -> {
             getString(R.string.sync_notification_error)
         }
+        progress.isBehind || progress.status == "syncing" -> progress.summary()
         else -> getString(R.string.sync_notification_running)
     }
 

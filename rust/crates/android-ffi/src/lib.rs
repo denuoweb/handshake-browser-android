@@ -46,6 +46,10 @@ const DNSSEC_DO_FLAG: u32 = 0x8000;
 const DEFAULT_DNS_UDP_PAYLOAD: usize = 1232;
 const DEFAULT_GATEWAY_PROOF_PEERS: usize = 2;
 const DEFAULT_GATEWAY_PROOF_TIMEOUT: Duration = Duration::from_secs(3);
+const ANDROID_HEADER_SYNC_BATCHES_PER_PEER: usize = 192;
+const ANDROID_MIN_PEER_TARGET: usize = 64;
+const MAINNET_GENESIS_TIME: u64 = 1_580_745_078;
+const MAINNET_TARGET_SPACING_SECONDS: u64 = 10 * 60;
 const HNS_DOH_HOST: &str = "hnsdoh.com";
 const HNS_DOH_PATH: &str = "/dns-query";
 static DOH_QUERY_ID: AtomicU16 = AtomicU16::new(0x484e);
@@ -379,11 +383,11 @@ fn doh_answer_from_body(
 }
 
 pub fn core_version() -> &'static str {
-    "hns-browser-rust-core/0.1.0"
+    "hns-browser-rust-core/0.1.1"
 }
 
 pub fn diagnostics_json() -> &'static str {
-    r#"{"core":"hns-browser-rust-core","version":"0.1.0","features":["header-hash","header-pow-validation","header-mainnet-difficulty-retarget","header-canonical-height-index","hns-name-hash","hns-dotted-root-label","urkel-proof-verification","urkel-proof-value-handoff","hns-name-state-resource-extraction","hns-resource-decoder","hns-resource-provider-adapter","hns-memory-resource-provider","hns-sqlite-resource-provider","hns-resource-cache-stats","hns-resource-cache-eviction","hns-resource-cache-cap-enforcement","hns-resource-cache-chain-anchors","hns-resource-cache-reorg-invalidation","hns-resource-cache-current-tip","hns-proof-backed-resolver-boundary","hns-delegating-resolver-boundary","hns-proof-backed-ns-address-hydration","hns-authoritative-dnssec-delegated-resolver","android-hns-doh-compat-resolver","dns-wire","dns-svcb-https","dnssec-ds-dnskey-link","dnssec-ds-sha1","dnssec-ds-sha384","dnssec-rrsig-signed-data","dnssec-canonical-name-rdata","dnssec-ecdsa-p256-verify","dnssec-ecdsa-p384-verify","dnssec-rsa-sha1-verify","dnssec-rsa-sha256-sha512-verify","dnssec-ed25519-verify","dnssec-signed-rrset-validation","dnssec-delegated-chain-validation","dnssec-delegated-no-data-validation","dnssec-delegated-name-error-validation","dnssec-delegated-cname-chain","dnssec-child-referral-validation","dnssec-child-cname-chain","dnssec-child-no-data-validation","dnssec-child-name-error-validation","dnssec-nsec-denial-validation","dnssec-nsec3-denial-validation","dnssec-nxdomain-name-error-validation","dane-policy","x509-spki-extraction","p2p-codec","p2p-tcp-peer-connection","p2p-static-peer-source","p2p-dns-seed-source","p2p-peer-diversity","p2p-sqlite-peer-store","sync-coordinator","sync-header-runner","sync-multi-batch-header-runner","sync-proof-scheduler","android-native-sync-once","android-sync-status","android-sync-outcome-status","android-clear-resolver-cache","android-persistent-gateway-resolver","android-gateway-live-proof-fetch","android-gateway-header-forwarding","android-gateway-body-forwarding","android-gateway-file-body-stream","android-webview-hns-intercept","android-service-worker-hns-intercept","android-hns-redirect-follow","android-actionable-hns-errors","hns-name-not-found-error","gateway-policy","gateway-hns-address-required","gateway-tlsa-service-scope","gateway-delegated-origin-address-lookup","gateway-origin-address-query","gateway-https-service-query","gateway-svcb-alpn-policy","gateway-actionable-nameserver-errors","gateway-cname-address-routing","android-proxy-gateway-hook","android-local-hns-connect-certs","hns-websocket-upgrade-fail-closed","http-origin-transport","http-origin-response-framing","https-rustls-transport","dane-tls-policy"],"securityDefault":"fail-closed"}"#
+    r#"{"core":"hns-browser-rust-core","version":"0.1.1","features":["header-hash","header-pow-validation","header-mainnet-difficulty-retarget","header-canonical-height-index","hns-name-hash","hns-dotted-root-label","urkel-proof-verification","urkel-proof-value-handoff","hns-name-state-resource-extraction","hns-resource-decoder","hns-resource-provider-adapter","hns-memory-resource-provider","hns-sqlite-resource-provider","hns-resource-cache-stats","hns-resource-cache-eviction","hns-resource-cache-cap-enforcement","hns-resource-cache-chain-anchors","hns-resource-cache-reorg-invalidation","hns-resource-cache-current-tip","hns-proof-backed-resolver-boundary","hns-delegating-resolver-boundary","hns-proof-backed-ns-address-hydration","hns-authoritative-dnssec-delegated-resolver","android-hns-doh-compat-resolver","dns-wire","dns-svcb-https","dnssec-ds-dnskey-link","dnssec-ds-sha1","dnssec-ds-sha384","dnssec-rrsig-signed-data","dnssec-canonical-name-rdata","dnssec-ecdsa-p256-verify","dnssec-ecdsa-p384-verify","dnssec-rsa-sha1-verify","dnssec-rsa-sha256-sha512-verify","dnssec-ed25519-verify","dnssec-signed-rrset-validation","dnssec-delegated-chain-validation","dnssec-delegated-no-data-validation","dnssec-delegated-name-error-validation","dnssec-delegated-cname-chain","dnssec-child-referral-validation","dnssec-child-cname-chain","dnssec-child-no-data-validation","dnssec-child-name-error-validation","dnssec-nsec-denial-validation","dnssec-nsec3-denial-validation","dnssec-nxdomain-name-error-validation","dane-policy","x509-spki-extraction","p2p-codec","p2p-tcp-peer-connection","p2p-static-peer-source","p2p-dns-seed-source","p2p-peer-diversity","p2p-sqlite-peer-store","sync-coordinator","sync-header-runner","sync-multi-batch-header-runner","sync-proof-scheduler","android-native-sync-once","android-sync-status","android-sync-outcome-status","android-sync-progress-heights","android-sync-high-batch-catchup","android-clear-resolver-cache","android-persistent-gateway-resolver","android-gateway-live-proof-fetch","android-gateway-header-forwarding","android-gateway-body-forwarding","android-gateway-file-body-stream","android-webview-hns-intercept","android-service-worker-hns-intercept","android-hns-redirect-follow","android-actionable-hns-errors","hns-name-not-found-error","gateway-policy","gateway-hns-address-required","gateway-tlsa-service-scope","gateway-delegated-origin-address-lookup","gateway-origin-address-query","gateway-https-service-query","gateway-svcb-alpn-policy","gateway-actionable-nameserver-errors","gateway-cname-address-routing","android-proxy-gateway-hook","android-local-hns-connect-certs","hns-websocket-upgrade-fail-closed","http-origin-transport","http-origin-response-framing","https-rustls-transport","dane-tls-policy"],"securityDefault":"fail-closed"}"#
 }
 
 pub fn sync_once(data_dir: &str) -> String {
@@ -480,13 +484,14 @@ fn sync_once_with_options(
 pub fn gateway_http_response(input: GatewayHttpRequestInput<'_>) -> Vec<u8> {
     let headers = match parse_gateway_headers(input.header_text) {
         Ok(headers) => headers,
-        Err(error) => return plain_response(400, "Bad Request", error),
+        Err(error) => return plain_response_for_request(&input, 400, "Bad Request", error),
     };
     let request = gateway_request(&input, headers);
 
     let base = Path::new(input.data_dir).join("hns");
     if let Err(error) = fs::create_dir_all(&base) {
-        return plain_response(
+        return plain_response_for_request(
+            &input,
             500,
             "Gateway Storage Error",
             &format!("create gateway directory: {error}"),
@@ -495,7 +500,8 @@ pub fn gateway_http_response(input: GatewayHttpRequestInput<'_>) -> Vec<u8> {
     let values = match SqliteResourceValueProvider::open(base.join("resources.sqlite")) {
         Ok(values) => values,
         Err(error) => {
-            return plain_response(
+            return plain_response_for_request(
+                &input,
                 500,
                 "Gateway Storage Error",
                 &format!("open resource cache: {error}"),
@@ -521,7 +527,12 @@ pub fn gateway_http_response(input: GatewayHttpRequestInput<'_>) -> Vec<u8> {
     ) {
         Ok(gateway) => gateway,
         Err(error) => {
-            return plain_response(500, "Gateway Configuration Error", &error.to_string());
+            return plain_response_for_request(
+                &input,
+                500,
+                "Gateway Configuration Error",
+                &error.to_string(),
+            );
         }
     };
 
@@ -534,7 +545,7 @@ pub fn gateway_http_response(input: GatewayHttpRequestInput<'_>) -> Vec<u8> {
         }
         Err(error) => {
             let (status, reason, detail) = map_gateway_error(&error);
-            plain_response(status, reason, detail)
+            plain_response_for_request(&input, status, reason, detail)
         }
     }
 }
@@ -545,13 +556,22 @@ pub fn gateway_http_response_body_to_file(
 ) -> Result<Vec<u8>, String> {
     let headers = match parse_gateway_headers(input.header_text) {
         Ok(headers) => headers,
-        Err(error) => return plain_response_to_file(400, "Bad Request", error, body_path),
+        Err(error) => {
+            return plain_response_to_file_for_request(
+                &input,
+                400,
+                "Bad Request",
+                error,
+                body_path,
+            );
+        }
     };
     let request = gateway_request(&input, headers);
 
     let base = Path::new(input.data_dir).join("hns");
     if let Err(error) = fs::create_dir_all(&base) {
-        return plain_response_to_file(
+        return plain_response_to_file_for_request(
+            &input,
             500,
             "Gateway Storage Error",
             &format!("create gateway directory: {error}"),
@@ -561,7 +581,8 @@ pub fn gateway_http_response_body_to_file(
     let values = match SqliteResourceValueProvider::open(base.join("resources.sqlite")) {
         Ok(values) => values,
         Err(error) => {
-            return plain_response_to_file(
+            return plain_response_to_file_for_request(
+                &input,
                 500,
                 "Gateway Storage Error",
                 &format!("open resource cache: {error}"),
@@ -588,7 +609,8 @@ pub fn gateway_http_response_body_to_file(
     ) {
         Ok(gateway) => gateway,
         Err(error) => {
-            return plain_response_to_file(
+            return plain_response_to_file_for_request(
+                &input,
                 500,
                 "Gateway Configuration Error",
                 &error.to_string(),
@@ -615,7 +637,7 @@ pub fn gateway_http_response_body_to_file(
         }
         Err(error) => {
             let (status, reason, detail) = map_gateway_error(&error);
-            plain_response_to_file(status, reason, detail, body_path)
+            plain_response_to_file_for_request(&input, status, reason, detail, body_path)
         }
     }
 }
@@ -865,8 +887,23 @@ fn map_gateway_error(error: &GatewayError) -> (u16, &'static str, &'static str) 
     }
 }
 
-fn plain_response(status: u16, reason: &str, detail: &str) -> Vec<u8> {
-    let body = plain_response_body(status, reason, detail);
+fn plain_response_for_request(
+    input: &GatewayHttpRequestInput<'_>,
+    status: u16,
+    reason: &str,
+    detail: &str,
+) -> Vec<u8> {
+    let address = gateway_request_address(input);
+    plain_response_with_address(status, reason, detail, Some(&address))
+}
+
+fn plain_response_with_address(
+    status: u16,
+    reason: &str,
+    detail: &str,
+    address: Option<&str>,
+) -> Vec<u8> {
+    let body = plain_response_body(status, reason, detail, address);
     let mut out = response_head(
         status,
         reason,
@@ -878,13 +915,25 @@ fn plain_response(status: u16, reason: &str, detail: &str) -> Vec<u8> {
     out
 }
 
-fn plain_response_to_file(
+fn plain_response_to_file_for_request(
+    input: &GatewayHttpRequestInput<'_>,
     status: u16,
     reason: &str,
     detail: &str,
     body_path: &Path,
 ) -> Result<Vec<u8>, String> {
-    let body = plain_response_body(status, reason, detail);
+    let address = gateway_request_address(input);
+    plain_response_to_file_with_address(status, reason, detail, Some(&address), body_path)
+}
+
+fn plain_response_to_file_with_address(
+    status: u16,
+    reason: &str,
+    detail: &str,
+    address: Option<&str>,
+    body_path: &Path,
+) -> Result<Vec<u8>, String> {
+    let body = plain_response_body(status, reason, detail, address);
     if let Some(parent) = body_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("create response directory: {error}"))?;
@@ -900,8 +949,25 @@ fn plain_response_to_file(
     Ok(out)
 }
 
-fn plain_response_body(status: u16, reason: &str, detail: &str) -> Vec<u8> {
-    format!("{status} {reason}\n{detail}\n").into_bytes()
+fn plain_response_body(status: u16, reason: &str, detail: &str, address: Option<&str>) -> Vec<u8> {
+    match address {
+        Some(address) => format!("{address}\n{status} {reason}\n{detail}\n").into_bytes(),
+        None => format!("{status} {reason}\n{detail}\n").into_bytes(),
+    }
+}
+
+fn gateway_request_address(input: &GatewayHttpRequestInput<'_>) -> String {
+    let scheme = input.scheme.to_ascii_lowercase();
+    let port = match (scheme.as_str(), input.port) {
+        ("http", 80) | ("https", 443) => String::new(),
+        (_, port) => format!(":{port}"),
+    };
+    let path = if input.path_and_query.is_empty() {
+        "/"
+    } else {
+        input.path_and_query
+    };
+    format!("{scheme}://{}{}{}", input.host, port, path)
 }
 
 fn response_head(
@@ -950,10 +1016,22 @@ fn run_sync_once(
         .map_err(|error| format!("load peer store: {error}"))?;
     let network = network::mainnet();
     let mut seed_error = None;
-    if seed_on_empty && peers.is_empty() {
+    if seed_on_empty && peers.len() < ANDROID_MIN_PEER_TARGET {
+        let was_empty = peers.is_empty();
         let source = DnsSeedPeerSource::from_network(&network);
-        if let Err(error) = peers.seed_from(&source) {
-            seed_error = Some(error.to_string());
+        match peers.seed_from(&source) {
+            Ok(inserted) => {
+                if inserted > 0 {
+                    peer_store
+                        .save_manager(&peers)
+                        .map_err(|error| format!("save seeded peers: {error}"))?;
+                }
+            }
+            Err(error) => {
+                if was_empty {
+                    seed_error = Some(error.to_string());
+                }
+            }
         }
     }
 
@@ -962,6 +1040,7 @@ fn run_sync_once(
         TcpHeaderPeerConnector,
         HeaderSyncRunnerConfig {
             preferred_peers: 4,
+            max_header_batches_per_peer: ANDROID_HEADER_SYNC_BATCHES_PER_PEER,
             timeout,
             ..HeaderSyncRunnerConfig::default()
         },
@@ -981,7 +1060,9 @@ fn run_sync_once(
     let now = now_unix_seconds();
     let peer_count = peers.len();
     let peer_groups = peers.address_group_count(now);
-    let best_peer_height = peers.iter().map(|peer| peer.last_height.0).max();
+    let best_peer_height = best_peer_height(&peers);
+    let best_height = best.as_ref().map(|header| header.height.0);
+    let estimated_tip_height = estimated_mainnet_tip_height(now);
     let resource_cache_evicted =
         prune_resource_cache_to_best_chain(&base, coordinator.chain())?.saturating_add(
             enforce_resource_cache_limit(&base, resource_cache_limit_bytes)?,
@@ -994,6 +1075,8 @@ fn run_sync_once(
         result.accepted,
         failed,
         seed_error.is_some(),
+        best_height,
+        best_peer_height,
     );
     let error = if status == "peer_failed" {
         Some(format!(
@@ -1012,8 +1095,9 @@ fn run_sync_once(
         failed,
         peer_count,
         peer_groups,
-        best_height: best.map(|header| header.height.0),
+        best_height,
         best_peer_height,
+        estimated_tip_height,
         resource_cache_entries,
         resource_cache_bytes,
         resource_cache_evicted,
@@ -1036,11 +1120,23 @@ fn classify_sync_status(
     accepted: usize,
     failed: usize,
     seed_failed: bool,
+    best_height: Option<u32>,
+    best_peer_height: Option<u32>,
 ) -> &'static str {
     if successful > 0 && accepted > 0 {
-        "synced"
+        if is_sync_behind(best_height, best_peer_height)
+            || is_sync_target_unknown(best_height, best_peer_height)
+        {
+            "syncing"
+        } else {
+            "synced"
+        }
     } else if successful > 0 {
-        "up_to_date"
+        if is_sync_behind(best_height, best_peer_height) {
+            "syncing"
+        } else {
+            "up_to_date"
+        }
     } else if attempted > 0 && failed == attempted {
         "peer_failed"
     } else if attempted > 0 {
@@ -1050,6 +1146,28 @@ fn classify_sync_status(
     } else {
         "idle"
     }
+}
+
+fn is_sync_behind(best_height: Option<u32>, best_peer_height: Option<u32>) -> bool {
+    matches!((best_height, best_peer_height), (Some(best), Some(peer)) if peer > best)
+}
+
+fn is_sync_target_unknown(best_height: Option<u32>, best_peer_height: Option<u32>) -> bool {
+    matches!((best_height, best_peer_height), (Some(best), None) if best > 0)
+}
+
+fn best_peer_height(peers: &hns_p2p::PeerManager) -> Option<u32> {
+    peers
+        .iter()
+        .map(|peer| peer.last_height.0)
+        .filter(|height| *height > 0)
+        .max()
+}
+
+fn estimated_mainnet_tip_height(now: u64) -> Option<u32> {
+    now.checked_sub(MAINNET_GENESIS_TIME)
+        .map(|elapsed| elapsed / MAINNET_TARGET_SPACING_SECONDS)
+        .and_then(|height| u32::try_from(height).ok())
 }
 
 fn read_sync_status(data_dir: &str) -> Result<NativeSyncStatus, String> {
@@ -1067,7 +1185,8 @@ fn read_sync_status(data_dir: &str) -> Result<NativeSyncStatus, String> {
         .map_err(|error| format!("read best header: {error}"))?;
     let now = now_unix_seconds();
     let best_height = best.map(|header| header.height.0);
-    let best_peer_height = peers.iter().map(|peer| peer.last_height.0).max();
+    let best_peer_height = best_peer_height(&peers);
+    let estimated_tip_height = estimated_mainnet_tip_height(now);
     let (resource_cache_entries, resource_cache_bytes) = resource_cache_stats(&base)?;
 
     Ok(NativeSyncStatus {
@@ -1080,6 +1199,7 @@ fn read_sync_status(data_dir: &str) -> Result<NativeSyncStatus, String> {
         peer_groups: peers.address_group_count(now),
         best_height,
         best_peer_height,
+        estimated_tip_height,
         resource_cache_entries,
         resource_cache_bytes,
         resource_cache_evicted: 0,
@@ -1095,6 +1215,7 @@ fn classify_cached_sync_status(
     match (best_height, best_peer_height) {
         (Some(best), Some(peer)) if best > 0 && peer <= best => "up_to_date",
         (Some(best), Some(peer)) if peer > best => "syncing",
+        (Some(best), None) if best > 0 => "syncing",
         _ => "idle",
     }
 }
@@ -1203,6 +1324,7 @@ struct NativeSyncStatus {
     peer_groups: usize,
     best_height: Option<u32>,
     best_peer_height: Option<u32>,
+    estimated_tip_height: Option<u32>,
     resource_cache_entries: usize,
     resource_cache_bytes: usize,
     resource_cache_evicted: usize,
@@ -1228,6 +1350,7 @@ impl NativeSyncStatus {
             peer_groups: 0,
             best_height: None,
             best_peer_height: None,
+            estimated_tip_height: None,
             resource_cache_entries: 0,
             resource_cache_bytes: 0,
             resource_cache_evicted: 0,
@@ -1247,6 +1370,7 @@ impl NativeSyncStatus {
             peer_groups: 0,
             best_height: None,
             best_peer_height: None,
+            estimated_tip_height: None,
             resource_cache_entries: 0,
             resource_cache_bytes: 0,
             resource_cache_evicted: 0,
@@ -1264,6 +1388,10 @@ impl NativeSyncStatus {
             .best_peer_height
             .map(|height| height.to_string())
             .unwrap_or_else(|| "null".to_owned());
+        let estimated_tip_height = self
+            .estimated_tip_height
+            .map(|height| height.to_string())
+            .unwrap_or_else(|| "null".to_owned());
         let error = self
             .error
             .as_ref()
@@ -1277,7 +1405,7 @@ impl NativeSyncStatus {
             .join(",");
 
         format!(
-            r#"{{"status":"{}","attempted":{},"successful":{},"accepted":{},"failed":{},"peerCount":{},"peerGroups":{},"bestHeight":{},"bestPeerHeight":{},"resourceCacheEntries":{},"resourceCacheBytes":{},"resourceCacheEvicted":{},"error":{},"failures":[{}]}}"#,
+            r#"{{"status":"{}","attempted":{},"successful":{},"accepted":{},"failed":{},"peerCount":{},"peerGroups":{},"bestHeight":{},"bestPeerHeight":{},"estimatedTipHeight":{},"resourceCacheEntries":{},"resourceCacheBytes":{},"resourceCacheEvicted":{},"error":{},"failures":[{}]}}"#,
             self.status,
             self.attempted,
             self.successful,
@@ -1287,6 +1415,7 @@ impl NativeSyncStatus {
             self.peer_groups,
             best_height,
             best_peer_height,
+            estimated_tip_height,
             self.resource_cache_entries,
             self.resource_cache_bytes,
             self.resource_cache_evicted,
@@ -1601,7 +1730,7 @@ mod tests {
 
     #[test]
     fn version_is_stable() {
-        assert_eq!(core_version(), "hns-browser-rust-core/0.1.0");
+        assert_eq!(core_version(), "hns-browser-rust-core/0.1.1");
     }
 
     #[test]
@@ -1673,6 +1802,8 @@ mod tests {
         assert!(diagnostics_json().contains(r#""android-native-sync-once""#));
         assert!(diagnostics_json().contains(r#""android-sync-status""#));
         assert!(diagnostics_json().contains(r#""android-sync-outcome-status""#));
+        assert!(diagnostics_json().contains(r#""android-sync-progress-heights""#));
+        assert!(diagnostics_json().contains(r#""android-sync-high-batch-catchup""#));
         assert!(diagnostics_json().contains(r#""android-clear-resolver-cache""#));
         assert!(diagnostics_json().contains(r#""android-persistent-gateway-resolver""#));
         assert!(diagnostics_json().contains(r#""android-gateway-live-proof-fetch""#));
@@ -1807,7 +1938,7 @@ mod tests {
             "syncing",
         );
         assert_eq!(classify_cached_sync_status(Some(0), Some(0)), "idle");
-        assert_eq!(classify_cached_sync_status(Some(10), None), "idle");
+        assert_eq!(classify_cached_sync_status(Some(10), None), "syncing");
     }
 
     #[test]
@@ -1822,6 +1953,7 @@ mod tests {
             peer_groups: 1,
             best_height: Some(0),
             best_peer_height: None,
+            estimated_tip_height: Some(335_684),
             resource_cache_entries: 0,
             resource_cache_bytes: 0,
             resource_cache_evicted: 0,
@@ -1837,6 +1969,7 @@ mod tests {
 
         assert!(json.contains(r#""status":"peer_failed""#));
         assert!(json.contains(r#""failed":1"#));
+        assert!(json.contains(r#""estimatedTipHeight":335684"#));
         assert!(json.contains(r#""error":"all 1 attempted sync peers failed; see failures""#,));
         assert!(json.contains(
             r#""failures":[{"address":"127.0.0.1:12038","stage":"connect","error":"connection \"closed\"\n"}]"#,
@@ -1845,12 +1978,39 @@ mod tests {
 
     #[test]
     fn sync_status_classifier_reports_up_to_date_and_peer_failed() {
-        assert_eq!(classify_sync_status(4, 1, 0, 3, false), "up_to_date");
-        assert_eq!(classify_sync_status(4, 1, 2, 3, false), "synced");
-        assert_eq!(classify_sync_status(4, 0, 0, 4, false), "peer_failed");
-        assert_eq!(classify_sync_status(4, 0, 0, 2, false), "attempted");
-        assert_eq!(classify_sync_status(0, 0, 0, 0, true), "seed_failed");
-        assert_eq!(classify_sync_status(0, 0, 0, 0, false), "idle");
+        assert_eq!(
+            classify_sync_status(4, 1, 0, 3, false, Some(335_591), Some(335_591)),
+            "up_to_date",
+        );
+        assert_eq!(
+            classify_sync_status(4, 1, 2, 3, false, Some(335_591), Some(335_591)),
+            "synced",
+        );
+        assert_eq!(
+            classify_sync_status(4, 1, 2, 3, false, Some(45_000), Some(335_684)),
+            "syncing",
+        );
+        assert_eq!(
+            classify_sync_status(4, 1, 2, 3, false, Some(92_000), None),
+            "syncing",
+        );
+        assert_eq!(
+            classify_sync_status(4, 1, 0, 3, false, Some(93_344), Some(335_684)),
+            "syncing",
+        );
+        assert_eq!(
+            classify_sync_status(4, 0, 0, 4, false, Some(0), Some(335_684)),
+            "peer_failed",
+        );
+        assert_eq!(
+            classify_sync_status(4, 0, 0, 2, false, Some(0), Some(335_684)),
+            "attempted",
+        );
+        assert_eq!(
+            classify_sync_status(0, 0, 0, 0, true, None, None),
+            "seed_failed",
+        );
+        assert_eq!(classify_sync_status(0, 0, 0, 0, false, None, None), "idle");
     }
 
     #[test]
@@ -2128,6 +2288,7 @@ mod tests {
         let text = String::from_utf8(response).unwrap();
 
         assert!(text.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert!(text.ends_with("http://welcome/\n400 Bad Request\nrequest header is malformed\n"));
         cleanup_dir(&path);
     }
 

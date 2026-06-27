@@ -28,6 +28,64 @@ class HnsSyncSchedulerTest {
         scheduler.close()
     }
 
+    @Test
+    fun nextDelayUsesActiveIntervalWhilePeerHeightIsAhead() {
+        val scheduler = HnsSyncScheduler(
+            dataDir = File("/tmp/hns-browser-test"),
+            bridge = RecordingSyncBridge("{}"),
+            activeIntervalMs = 7L,
+            retryIntervalMs = 11L,
+            idleIntervalMs = 13L,
+        )
+
+        assertEquals(
+            7L,
+            scheduler.nextDelayMs(
+                HnsSyncSnapshot(
+                    statusJson = """{"status":"synced","bestHeight":45000,"bestPeerHeight":335684}""",
+                    updatedAtMillis = 1L,
+                ),
+            ),
+        )
+        assertEquals(
+            13L,
+            scheduler.nextDelayMs(
+                HnsSyncSnapshot(
+                    statusJson = """{"status":"up_to_date","bestHeight":335684,"bestPeerHeight":335684}""",
+                    updatedAtMillis = 2L,
+                ),
+            ),
+        )
+        assertEquals(
+            7L,
+            scheduler.nextDelayMs(
+                HnsSyncSnapshot(
+                    statusJson = """{"status":"syncing","bestHeight":92000,"bestPeerHeight":null,"estimatedTipHeight":335684,"peerCount":0}""",
+                    updatedAtMillis = 3L,
+                ),
+            ),
+        )
+        assertEquals(
+            11L,
+            scheduler.nextDelayMs(
+                HnsSyncSnapshot(
+                    statusJson = """{"status":"peer_failed","bestHeight":45000,"bestPeerHeight":335684}""",
+                    updatedAtMillis = 4L,
+                ),
+            ),
+        )
+        assertEquals(
+            11L,
+            scheduler.nextDelayMs(
+                HnsSyncSnapshot(
+                    statusJson = """{"status":"idle","bestHeight":null,"bestPeerHeight":null,"estimatedTipHeight":335684,"peerCount":0}""",
+                    updatedAtMillis = 5L,
+                ),
+            ),
+        )
+        scheduler.close()
+    }
+
     private class RecordingSyncBridge(
         val response: String,
     ) : HnsSyncBridge {

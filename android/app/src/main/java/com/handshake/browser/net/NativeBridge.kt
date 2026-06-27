@@ -77,6 +77,7 @@ object NativeBridge : HnsGatewayBridge, HnsSyncBridge, LocalTlsCertificateProvid
         """{"core":"unavailable","version":"unavailable","features":[],"securityDefault":"fail-closed"}"""
     }
 
+    @Synchronized
     override fun syncOnce(dataDir: String): String = if (isLoaded) {
         nativeSyncOnce(dataDir)
     } else {
@@ -239,7 +240,7 @@ object NativeBridge : HnsGatewayBridge, HnsSyncBridge, LocalTlsCertificateProvid
     }
 
     private fun unavailableSyncJson(error: String = "rust-core-unavailable"): String =
-        """{"status":"error","attempted":0,"successful":0,"accepted":0,"failed":0,"peerCount":0,"peerGroups":0,"bestHeight":null,"bestPeerHeight":null,"resourceCacheEntries":0,"resourceCacheBytes":0,"resourceCacheEvicted":0,"error":"$error","failures":[]}"""
+        """{"status":"error","attempted":0,"successful":0,"accepted":0,"failed":0,"peerCount":0,"peerGroups":0,"bestHeight":null,"bestPeerHeight":null,"estimatedTipHeight":null,"resourceCacheEntries":0,"resourceCacheBytes":0,"resourceCacheEvicted":0,"error":"$error","failures":[]}"""
 
     private const val LOCAL_TLS_FINGERPRINT_BYTES = 32
 }

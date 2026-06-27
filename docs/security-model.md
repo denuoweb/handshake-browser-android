@@ -13,6 +13,7 @@ The default proof-backed path does not trust a single peer, external HNS resolve
 - TLSA exists but DANE validation fails: fail closed.
 - Sync stale: block HNS secure state and show a sync-specific browser error.
 - Sync attempts that make no progress must distinguish up-to-date peers from all-peer failure.
+- Sync catch-up must continue while persisted `bestPeerHeight` or the estimated mainnet tip is greater than local `bestHeight`, regardless of whether the latest native tick accepted headers.
 - HNS toolbar state must not show verified unless the proxy is active, the native sync status is `synced` or `up_to_date`, and the current main-frame HNS gateway response has not failed.
 - Main-frame HNS gateway 4xx/5xx responses must override ready sync state and show validation failed.
 - No-network sync status reads may report `up_to_date` only when stored peer heights are not ahead of a non-genesis local best header.
@@ -27,6 +28,7 @@ The default proof-backed path does not trust a single peer, external HNS resolve
 - P2P frames reject wrong network magic and payloads above the 8 MB HSD message limit.
 - P2P sockets must use bounded frame decoding, connection timeouts, and session-state checks before accepting headers or proofs.
 - Header sync must not request additional headers from a peer whose advertised height is not ahead of the local best header.
+- Android first-run header sync should use active polling and high-batch native runs while behind, then fall back to idle polling only after stored peer heights are not ahead.
 - Transient peer failures must not permanently exhaust the outbound peer pool; malformed consensus data is still scored and cooldown-banned.
 - Version packets use HSD's 88-byte network address format rather than Bitcoin's shorter address encoding.
 - Version/verack ordering is accepted in either HSD-observed order before the session enters ready state.

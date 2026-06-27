@@ -16,6 +16,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.webkit.WebViewFeature
 import com.handshake.browser.BuildConfig
+import com.handshake.browser.net.HnsSyncForegroundService
 import com.handshake.browser.net.NativeBridge
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -23,6 +24,7 @@ import kotlin.concurrent.thread
 class DiagnosticsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        HnsSyncForegroundService.start(this)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -42,6 +44,7 @@ class DiagnosticsActivity : ComponentActivity() {
         root.addView(Button(this).apply {
             text = "Run sync now"
             setOnClickListener {
+                HnsSyncForegroundService.start(this@DiagnosticsActivity)
                 isEnabled = false
                 syncStatus.text = "Sync status: running"
                 val running = AtomicBoolean(true)

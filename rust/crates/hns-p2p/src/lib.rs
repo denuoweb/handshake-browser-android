@@ -235,7 +235,7 @@ impl Default for VersionPacket {
             time: 0,
             remote: NetAddress::default(),
             nonce: ZERO_NONCE,
-            agent: "/hns-browser:0.1.0/".to_owned(),
+            agent: "/hns-browser:0.1.1/".to_owned(),
             height: Height(0),
             no_relay: true,
         }
