@@ -30,6 +30,7 @@ The default proof-backed path does not trust a single peer, external HNS resolve
 - Header sync must not request additional headers from a peer whose advertised height is not ahead of the local best header.
 - Android first-run header sync should use active polling and high-batch native runs while behind, then fall back to idle polling only after stored peer heights are not ahead.
 - Transient peer failures must not permanently exhaust the outbound peer pool; malformed consensus data is still scored and cooldown-banned.
+- Peer-gossip addresses are advisory only; addr packets are bounded, deduplicated, service-filtered, and still subject to outbound peer scoring before any header or proof data is accepted.
 - Version packets use HSD's 88-byte network address format rather than Bitcoin's shorter address encoding.
 - Version/verack ordering is accepted in either HSD-observed order before the session enters ready state.
 - Advisory or unknown P2P packets are ignored while waiting for required sync packets; they do not advance header/proof state.

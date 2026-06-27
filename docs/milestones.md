@@ -8,10 +8,10 @@
 - Header store abstraction, SQLite persistence, canonical hash-by-height indexing, and best-tip selection.
 - Handshake `getheaders`, `headers`, `getproof`, and `proof` payload codec.
 - HSD-compatible 9-byte P2P frame encoder/decoder.
-- Blocking TCP peer connection for version/verack, getheaders, and getproof flows.
+- Blocking TCP peer connection for version/verack, getaddr, getheaders, and getproof flows.
 - Header sync session state machine for version/verack and request/response sequencing.
 - Peer scoring and outbound selection policy.
-- Static peer seeding, HSD-compatible DNS seed discovery, address-group-aware peer diversity, and SQLite peer-state persistence.
+- Static peer seeding, HSD-compatible DNS seed discovery, bounded getaddr peer discovery, address-group-aware peer diversity, and SQLite peer-state persistence.
 - HSD-compatible Handshake name validation and SHA3-256 name-hash derivation.
 - Urkel proof parser and verifier boundary.
 - HSD resource decoder for DS, NS, GLUE4/GLUE6, SYNTH4/SYNTH6, and TXT records.

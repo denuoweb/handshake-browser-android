@@ -5,7 +5,7 @@
 - `MainActivity.onStart` starts `HnsSyncForegroundService` automatically, so first install no longer depends on opening Diagnostics and pressing `Run sync now`.
 - `HnsSyncScheduler` runs immediately, then uses active polling while the local `bestHeight` is below the known or estimated target, retry polling for peer/seed discovery failures, and a 10-minute idle poll after the app is caught up.
 - The native Android sync tick requests up to 192 header batches per peer per run, which is enough to cover current mainnet-scale catch-up in one or a small number of foreground ticks when a healthy peer serves full batches.
-- Seeded peers are persisted before the long header run starts, and DNS seeds are refreshed while the peer table is below target, so a killed or interrupted first run does not leave the peer database empty after headers have already advanced.
+- Seeded peers are persisted before the long header run starts, DNS seeds are refreshed while the peer table is below target, and successful peers are queried with bounded `getaddr` discovery, so a killed or interrupted first run does not leave the peer database empty after headers have already advanced.
 - Native status reports `syncing` whenever persisted peer height or the estimated mainnet tip is still ahead of local best height, even if the current tick accepted headers. `synced` is reserved for ticks that accepted headers and reached the known peer target; no-network status reports `up_to_date` when stored peers are not ahead.
 
 ## User-Visible Progress
@@ -21,4 +21,4 @@
 
 - Initial sync still downloads and validates headers from live peers at first run; the APK does not yet ship a recent signed/checkpointed header snapshot.
 - Proof data is still fetched on demand for requested HNS names rather than prefetching popular names.
-- Peer quality dominates first-run time. The current path seeds peers automatically and retries quickly while behind, but poor peers can still slow catch-up until peer scoring rotates to better peers.
+- Peer quality dominates first-run time. The current path seeds peers automatically, expands the peer table from successful peers through bounded `getaddr` discovery, and retries quickly while behind, but poor peers can still slow catch-up until peer scoring rotates to better peers.

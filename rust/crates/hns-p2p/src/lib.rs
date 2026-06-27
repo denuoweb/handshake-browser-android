@@ -12,6 +12,7 @@ use thiserror::Error;
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const SERVICE_NETWORK: u64 = 1;
 pub const MAX_INV: usize = 50_000;
+pub const MAX_ADDR: usize = 1_000;
 pub const MAX_HEADERS: usize = 2_000;
 pub const MAX_AGENT_LEN: usize = 255;
 pub const FRAME_HEADER_SIZE: usize = 9;
@@ -31,6 +32,8 @@ pub enum PacketType {
     Verack = 1,
     Ping = 2,
     Pong = 3,
+    GetAddr = 4,
+    Addr = 5,
     GetHeaders = 10,
     Headers = 11,
     SendHeaders = 12,
@@ -71,6 +74,11 @@ pub struct HeadersPacket {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddrPacket {
+    pub items: Vec<NetAddress>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProofRequest {
     pub root: Hash,
     pub key: Hash,
@@ -89,6 +97,8 @@ pub enum Packet {
     Verack,
     Ping([u8; 8]),
     Pong([u8; 8]),
+    GetAddr,
+    Addr(AddrPacket),
     GetHeaders(LocatorPacket),
     Headers(HeadersPacket),
     SendHeaders,
@@ -825,7 +835,10 @@ impl HeaderSyncSession {
             (HeaderSyncState::Closed, _) => {
                 vec![HeaderSyncAction::Disconnect("session is closed")]
             }
-            (_, Packet::SendHeaders | Packet::Unknown { .. }) => Vec::new(),
+            (
+                _,
+                Packet::GetAddr | Packet::Addr(_) | Packet::SendHeaders | Packet::Unknown { .. },
+            ) => Vec::new(),
             (_, Packet::Ping(nonce)) => vec![HeaderSyncAction::Send(Packet::Pong(nonce))],
             (_, Packet::Pong(_)) => Vec::new(),
             _ => vec![HeaderSyncAction::Disconnect(
@@ -1042,6 +1055,26 @@ impl<T: Read + Write> PeerConnection<T> {
         }
     }
 
+    pub fn request_addresses(&mut self) -> Result<Vec<SocketAddr>, P2pError> {
+        self.send_packet(&Packet::GetAddr)?;
+        loop {
+            match self.receive_packet()? {
+                Packet::Addr(addresses) => return Ok(addresses.service_sockets(SERVICE_NETWORK)),
+                Packet::Ping(nonce) => self.send_packet(&Packet::Pong(nonce))?,
+                Packet::GetAddr
+                | Packet::Pong(_)
+                | Packet::SendHeaders
+                | Packet::Unknown { .. }
+                | Packet::Verack => {}
+                Packet::Version(_)
+                | Packet::GetHeaders(_)
+                | Packet::Headers(_)
+                | Packet::GetProof(_)
+                | Packet::Proof(_) => return Err(P2pError::UnexpectedAction),
+            }
+        }
+    }
+
     pub fn request_proof(
         &mut self,
         session: &mut HeaderSyncSession,
@@ -1128,6 +1161,8 @@ impl Packet {
             Self::Verack => PacketType::Verack,
             Self::Ping(_) => PacketType::Ping,
             Self::Pong(_) => PacketType::Pong,
+            Self::GetAddr => PacketType::GetAddr,
+            Self::Addr(_) => PacketType::Addr,
             Self::GetHeaders(_) => PacketType::GetHeaders,
             Self::Headers(_) => PacketType::Headers,
             Self::SendHeaders => PacketType::SendHeaders,
@@ -1141,8 +1176,9 @@ impl Packet {
         let mut out = Vec::new();
         match self {
             Self::Version(packet) => packet.encode(&mut out)?,
-            Self::Verack | Self::SendHeaders => {}
+            Self::Verack | Self::GetAddr | Self::SendHeaders => {}
             Self::Ping(nonce) | Self::Pong(nonce) => out.extend(nonce),
+            Self::Addr(packet) => packet.encode(&mut out)?,
             Self::GetHeaders(packet) => packet.encode(&mut out)?,
             Self::Headers(packet) => packet.encode(&mut out)?,
             Self::GetProof(packet) => {
@@ -1166,6 +1202,8 @@ impl Packet {
             1 => Self::Verack,
             2 => Self::Ping(reader.read_array()?),
             3 => Self::Pong(reader.read_array()?),
+            4 => Self::GetAddr,
+            5 => Self::Addr(AddrPacket::decode(&mut reader)?),
             10 => Self::GetHeaders(LocatorPacket::decode(&mut reader)?),
             11 => Self::Headers(HeadersPacket::decode(&mut reader)?),
             12 => Self::SendHeaders,
@@ -1302,6 +1340,51 @@ impl NetAddress {
             address,
             port,
         })
+    }
+}
+
+impl AddrPacket {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), P2pError> {
+        if self.items.len() > MAX_ADDR {
+            return Err(P2pError::CountLimit);
+        }
+
+        write_varint(out, self.items.len() as u64);
+        for address in &self.items {
+            address.encode(out);
+        }
+        Ok(())
+    }
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, P2pError> {
+        let count = read_varint(reader)? as usize;
+        if count > MAX_ADDR {
+            return Err(P2pError::CountLimit);
+        }
+
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
+            items.push(NetAddress::decode(reader)?);
+        }
+        Ok(Self { items })
+    }
+
+    pub fn service_sockets(&self, required_services: u64) -> Vec<SocketAddr> {
+        let mut sockets = Vec::new();
+        let mut seen = HashSet::new();
+        for item in &self.items {
+            if item.services & required_services != required_services
+                || item.port == 0
+                || item.address.is_unspecified()
+            {
+                continue;
+            }
+            let socket = SocketAddr::new(item.address, item.port);
+            if seen.insert(socket) {
+                sockets.push(socket);
+            }
+        }
+        sockets
     }
 }
 
@@ -1465,6 +1548,33 @@ mod tests {
     }
 
     #[test]
+    fn addr_round_trip_filters_service_sockets() {
+        let good: SocketAddr = "127.0.0.2:12038".parse().unwrap();
+        let missing_service: SocketAddr = "127.0.0.3:12038".parse().unwrap();
+        let missing_port: SocketAddr = "127.0.0.4:0".parse().unwrap();
+        let unspecified: SocketAddr = "0.0.0.0:12038".parse().unwrap();
+        let packet = Packet::Addr(AddrPacket {
+            items: vec![
+                NetAddress::from_socket(good, SERVICE_NETWORK),
+                NetAddress::from_socket(good, SERVICE_NETWORK),
+                NetAddress::from_socket(missing_service, 0),
+                NetAddress::from_socket(missing_port, SERVICE_NETWORK),
+                NetAddress::from_socket(unspecified, SERVICE_NETWORK),
+            ],
+        });
+        let payload = packet.encode_payload().unwrap();
+        let decoded = Packet::decode_payload(PacketType::Addr as u8, &payload).unwrap();
+
+        assert_eq!(decoded, packet);
+        match decoded {
+            Packet::Addr(addresses) => {
+                assert_eq!(addresses.service_sockets(SERVICE_NETWORK), vec![good]);
+            }
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_noncanonical_varint() {
         assert_eq!(
             Packet::decode_payload(PacketType::GetHeaders as u8, &[0xfd, 1, 0]).unwrap_err(),
@@ -1556,6 +1666,12 @@ mod tests {
             assert_eq!(peer.receive_packet().unwrap(), Packet::Verack);
             peer.send_packet(&Packet::Verack).unwrap();
 
+            assert_eq!(peer.receive_packet().unwrap(), Packet::GetAddr);
+            peer.send_packet(&Packet::Addr(AddrPacket {
+                items: vec![NetAddress::from_socket(address, SERVICE_NETWORK)],
+            }))
+            .unwrap();
+
             match peer.receive_packet().unwrap() {
                 Packet::GetHeaders(request) => {
                     assert_eq!(request.locator, vec![server_genesis.hash()]);
@@ -1588,6 +1704,7 @@ mod tests {
 
         let remote = peer.handshake(&mut session).unwrap();
         assert_eq!(remote.services & SERVICE_NETWORK, SERVICE_NETWORK);
+        assert_eq!(peer.request_addresses().unwrap(), vec![address]);
         assert_eq!(
             peer.request_headers(&mut session, vec![genesis.hash()], Hash::ZERO)
                 .unwrap(),

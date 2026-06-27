@@ -40,6 +40,7 @@ pub struct HeaderSyncCoordinator<S> {
 pub struct HeaderSyncRunnerConfig {
     pub preferred_peers: usize,
     pub max_header_batches_per_peer: usize,
+    pub discover_peers: bool,
     pub timeout: Duration,
     pub stop: Hash,
     pub malformed_ban_seconds: u64,
@@ -86,6 +87,10 @@ pub trait HeaderPeerClient {
         locator: Vec<Hash>,
         stop: Hash,
     ) -> Result<Vec<BlockHeader>, P2pError>;
+
+    fn request_addresses(&mut self) -> Result<Vec<SocketAddr>, P2pError> {
+        Ok(Vec::new())
+    }
 }
 
 pub trait HeaderPeerConnector {
@@ -163,6 +168,7 @@ impl Default for HeaderSyncRunnerConfig {
         Self {
             preferred_peers: DEFAULT_OUTBOUND_PEERS,
             max_header_batches_per_peer: DEFAULT_MAX_HEADER_BATCHES_PER_PEER,
+            discover_peers: true,
             timeout: DEFAULT_SYNC_TIMEOUT,
             stop: Hash::ZERO,
             malformed_ban_seconds: DEFAULT_MALFORMED_BAN_SECONDS,
@@ -205,6 +211,10 @@ impl<T: Read + Write> HeaderPeerClient for PeerConnection<T> {
         stop: Hash,
     ) -> Result<Vec<BlockHeader>, P2pError> {
         PeerConnection::request_headers(self, session, locator, stop)
+    }
+
+    fn request_addresses(&mut self) -> Result<Vec<SocketAddr>, P2pError> {
+        PeerConnection::request_addresses(self)
     }
 }
 
@@ -324,6 +334,11 @@ impl<C: HeaderPeerConnector> HeaderSyncRunner<C> {
                 }));
             }
         };
+        if self.config.discover_peers
+            && let Ok(discovered) = peer.request_addresses()
+        {
+            peers.seed(discovered);
+        }
         let mut accepted = 0usize;
         let mut best = coordinator.chain().best_header()?;
         if best
@@ -1120,6 +1135,34 @@ mod tests {
     }
 
     #[test]
+    fn header_sync_runner_discovers_addresses_from_successful_peer() {
+        let mut coordinator = seeded_coordinator();
+        let address: std::net::SocketAddr = "127.0.0.1:12043".parse().unwrap();
+        let discovered: std::net::SocketAddr = "127.0.0.2:12038".parse().unwrap();
+        let mut peers = PeerManager::default();
+        peers.seed([address]);
+        let connector = ScriptedHeaderConnector::new([(
+            address,
+            ScriptedHeaderPeer::headers(Height(0), Vec::new()).with_addresses(vec![discovered]),
+        )]);
+        let runner = HeaderSyncRunner::with_config(
+            network::mainnet(),
+            connector,
+            HeaderSyncRunnerConfig {
+                preferred_peers: 1,
+                ..HeaderSyncRunnerConfig::default()
+            },
+        );
+
+        let result = runner
+            .sync_once(&mut coordinator, &mut peers, 1_000)
+            .unwrap();
+
+        assert_eq!(result.successful, 1);
+        assert!(peers.get(discovered).is_some());
+    }
+
+    #[test]
     fn header_sync_runner_reports_peer_failure_stage() {
         let mut coordinator = seeded_coordinator();
         let address: std::net::SocketAddr = "127.0.0.1:12039".parse().unwrap();
@@ -1476,6 +1519,7 @@ mod tests {
     struct ScriptedHeaderPeer {
         remote_height: Height,
         headers: VecDeque<Result<Vec<BlockHeader>, P2pError>>,
+        addresses: Vec<SocketAddr>,
     }
 
     impl ScriptedHeaderPeer {
@@ -1490,6 +1534,7 @@ mod tests {
             Self {
                 remote_height,
                 headers: batches.into_iter().map(Ok).collect(),
+                addresses: Vec::new(),
             }
         }
 
@@ -1500,7 +1545,13 @@ mod tests {
             Self {
                 remote_height,
                 headers: errors.into_iter().map(Err).collect(),
+                addresses: Vec::new(),
             }
+        }
+
+        fn with_addresses(mut self, addresses: Vec<SocketAddr>) -> Self {
+            self.addresses = addresses;
+            self
         }
     }
 
@@ -1522,6 +1573,10 @@ mod tests {
             _stop: Hash,
         ) -> Result<Vec<BlockHeader>, P2pError> {
             self.headers.pop_front().unwrap_or_else(|| Ok(Vec::new()))
+        }
+
+        fn request_addresses(&mut self) -> Result<Vec<SocketAddr>, P2pError> {
+            Ok(self.addresses.clone())
         }
     }
 
