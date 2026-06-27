@@ -13,13 +13,6 @@ Source code: https://github.com/denuoweb/handshake-browser-android
 - `docs/`: Architecture, security model, version audit, and milestone notes.
 - `scripts/`: Local validation helpers.
 
-## Support
-
-Donations are optional and do not unlock any app features.
-
-- HNS donation URI: `handshake:hs1q5997733eq7f4yyk2vq2z8gz3yqyvpz422ypggh?label=Denuo%20Web%20Handshake%20Browser&message=Handshake%20Browser%20donation`
-- HNS donation address: `hs1q5997733eq7f4yyk2vq2z8gz3yqyvpz422ypggh`
-
 ## Current Scope
 
 - Parses and serializes Handshake block headers.
@@ -68,6 +61,12 @@ The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
 Debug/demo builds are unsigned beyond the default Android debug key and are intended for testing only. The diagnostics screen identifies Denuo Web, LLC as publisher, shows the build channel and license, and states that donations are optional and unlock no app features.
 
 The APK build runs `scripts/build-rust-android.sh` through Gradle, builds `android-ffi` with `cargo-ndk`, strips the generated `.so` files with the APK Workbench NDK `llvm-objcopy`, and packages them under `lib/<abi>/libhns_browser_ffi.so`.
+
+## Support
+
+Donations are optional and do not unlock any app features.
+
+- HNS donation address: `hs1q5997733eq7f4yyk2vq2z8gz3yqyvpz422ypggh`
 
 ## License
 
