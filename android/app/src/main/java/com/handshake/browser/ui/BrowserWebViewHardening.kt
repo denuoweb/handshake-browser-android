@@ -12,6 +12,7 @@ internal object BrowserWebViewHardening {
             javaScriptEnabled = allowJavaScript
             domStorageEnabled = true
             loadsImagesAutomatically = true
+            cacheMode = WebSettings.LOAD_NO_CACHE
             mediaPlaybackRequiresUserGesture = true
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             safeBrowsingEnabled = true

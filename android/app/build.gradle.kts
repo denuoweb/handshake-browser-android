@@ -33,8 +33,8 @@ android {
         applicationId = "com.handshake.browser"
         minSdk = 34
         targetSdk = 37
-        versionCode = 9
-        versionName = "0.1.8"
+        versionCode = 10
+        versionName = "0.1.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {

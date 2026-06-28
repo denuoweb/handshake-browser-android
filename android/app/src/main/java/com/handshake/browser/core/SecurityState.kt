@@ -2,6 +2,7 @@ package com.handshake.browser.core
 
 enum class SecurityState {
     Syncing,
+    Loading,
     HnsVerified,
     HnsCompatibility,
     DaneVerified,

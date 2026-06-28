@@ -107,6 +107,8 @@ class MainActivity : ComponentActivity() {
     private var mainFrameHnsTraceJson: String? = null
     private var lastSyncSnapshot: HnsSyncSnapshot? = null
     private var syncReceiverRegistered: Boolean = false
+    @Volatile
+    private var activeMainFrameUrl: String? = null
     private var pageIsLoading: Boolean = false
     private var pageLoadProgress: Int = 0
 
@@ -120,18 +122,24 @@ class MainActivity : ComponentActivity() {
             EPHEMERAL_GATEWAY_PORT,
             filesDir,
             strictHnsMode = { HnsResolutionPreferences.strictHnsMode(this) },
+            onHnsStatus = { host, statusCode, tlsPolicy, resolverPolicy, traceJson ->
+                runOnUiThread {
+                    if (isActiveMainFrameHost(host) && mainFrameHnsStatusCode == null) {
+                        applyMainFrameHnsStatus(statusCode, tlsPolicy, resolverPolicy, traceJson)
+                    }
+                }
+            },
         )
         webViewGatewayInterceptor = HnsWebViewGatewayInterceptor(
             dataDir = filesDir,
             allowProxyFallbackForBodyRequests = { proxyAvailable },
             strictHnsMode = { HnsResolutionPreferences.strictHnsMode(this) },
+            reportAllHnsStatuses = true,
             onMainFrameHnsStatus = { statusCode, tlsPolicy, resolverPolicy, traceJson ->
                 runOnUiThread {
-                    mainFrameHnsStatusCode = statusCode
-                    mainFrameHnsTlsPolicy = tlsPolicy
-                    mainFrameHnsResolverPolicy = resolverPolicy
-                    mainFrameHnsTraceJson = traceJson
-                    refreshSecurityState()
+                    if (mainFrameHnsStatusCode == null) {
+                        applyMainFrameHnsStatus(statusCode, tlsPolicy, resolverPolicy, traceJson)
+                    }
                 }
             },
         )
@@ -514,6 +522,7 @@ class MainActivity : ComponentActivity() {
         mainFrameHnsTlsPolicy = null
         mainFrameHnsResolverPolicy = null
         mainFrameHnsTraceJson = null
+        activeMainFrameUrl = target.url
         pageIsLoading = true
         pageLoadProgress = 0
         refreshSecurityState()
@@ -541,6 +550,19 @@ class MainActivity : ComponentActivity() {
                 mainFrameHnsResolverPolicy = mainFrameHnsResolverPolicy,
             ),
         )
+    }
+
+    private fun applyMainFrameHnsStatus(
+        statusCode: Int,
+        tlsPolicy: HnsPageTlsPolicy?,
+        resolverPolicy: HnsPageResolverPolicy?,
+        traceJson: String?,
+    ) {
+        mainFrameHnsStatusCode = statusCode
+        mainFrameHnsTlsPolicy = tlsPolicy
+        mainFrameHnsResolverPolicy = resolverPolicy
+        mainFrameHnsTraceJson = traceJson
+        refreshSecurityState()
     }
 
     private fun refreshSyncProgress() {
@@ -574,6 +596,7 @@ class MainActivity : ComponentActivity() {
     private fun setSecurityState(state: SecurityState) {
         securityLabel.text = when (state) {
             SecurityState.Syncing -> getString(R.string.security_syncing)
+            SecurityState.Loading -> getString(R.string.security_loading)
             SecurityState.HnsVerified -> getString(R.string.security_hns_verified)
             SecurityState.HnsCompatibility -> getString(R.string.security_hns_compat)
             SecurityState.DaneVerified -> getString(R.string.security_dane_verified)
@@ -590,6 +613,7 @@ class MainActivity : ComponentActivity() {
             pageIsLoading = true
             pageLoadProgress = pageLoadProgress.coerceAtLeast(5)
             omnibox.setText(url)
+            activeMainFrameUrl = url
             currentTargetKind = classifier.classify(url).kind
             mainFrameHnsStatusCode = null
             mainFrameHnsTlsPolicy = null
@@ -600,7 +624,9 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-            val target = classifier.classify(request.url.toString())
+            val requestUrl = request.url.toString()
+            activeMainFrameUrl = requestUrl
+            val target = classifier.classify(requestUrl)
             currentTargetKind = target.kind
             mainFrameHnsStatusCode = null
             mainFrameHnsTlsPolicy = null
@@ -615,7 +641,15 @@ class MainActivity : ComponentActivity() {
             request: WebResourceRequest,
         ): WebResourceResponse? {
             assetLoader.shouldInterceptRequest(request.url)?.let { return it }
-            return webViewGatewayInterceptor.intercept(request)
+            val requestUrl = request.url.toString()
+            val isMainFrame = request.isForMainFrame || isActiveMainFrameRequest(requestUrl)
+            return webViewGatewayInterceptor.intercept(
+                method = request.method,
+                url = requestUrl,
+                requestHeaders = request.requestHeaders.orEmpty(),
+                isForMainFrame = isMainFrame,
+            )
+                ?.toWebResourceResponse()
                 ?: super.shouldInterceptRequest(view, request)
         }
 
@@ -630,6 +664,7 @@ class MainActivity : ComponentActivity() {
 
         override fun onPageFinished(view: WebView, url: String) {
             omnibox.setText(url)
+            activeMainFrameUrl = url
             pageIsLoading = false
             pageLoadProgress = PAGE_PROGRESS_MAX
             recordHistoryEntry(url, view.title)
@@ -790,6 +825,21 @@ class MainActivity : ComponentActivity() {
             ?: omnibox.text.toString()
                 .trim()
                 .takeIf { it.isNotBlank() && it != "about:blank" }
+
+    private fun isActiveMainFrameRequest(url: String): Boolean {
+        val activeUrl = activeMainFrameUrl ?: return false
+        return url.mainFrameMatchKey() == activeUrl.mainFrameMatchKey()
+    }
+
+    private fun isActiveMainFrameHost(host: String): Boolean {
+        val activeHost = activeMainFrameUrl
+            ?.let { classifier.classify(it).displayHost }
+            ?: return false
+        return activeHost.equals(host, ignoreCase = true)
+    }
+
+    private fun String.mainFrameMatchKey(): String =
+        trim().substringBefore('#')
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).toInt()

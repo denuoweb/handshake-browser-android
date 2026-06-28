@@ -61,7 +61,7 @@ class SettingsActivity : ComponentActivity() {
 
             addView(sectionHeading("HNS resolution"))
             addView(strictHnsModeOption())
-            addView(bodyText("Strict mode never uses the third-party HNS DoH compatibility fallback. Compatibility mode may use it after direct delegated resolution fails."))
+            addView(bodyText("Strict mode never uses the third-party HNS DoH compatibility fallback. Compatibility mode may use it when a current local HNS proof is unavailable or direct delegated resolution fails."))
             addView(hnsModeStatus)
             addView(actionButton("View diagnostics") {
                 startActivity(Intent(this@SettingsActivity, DiagnosticsActivity::class.java))
@@ -345,7 +345,7 @@ class SettingsActivity : ComponentActivity() {
         if (HnsResolutionPreferences.strictHnsMode(this)) {
             "Strict. Delegated resolution failures fail closed."
         } else {
-            "Compatibility. HNS DoH fallback may be used after direct delegated resolution fails."
+            "Compatibility. HNS DoH fallback may be used after proof availability or delegated resolution failures."
         }
 
     private fun historySummary(): String {

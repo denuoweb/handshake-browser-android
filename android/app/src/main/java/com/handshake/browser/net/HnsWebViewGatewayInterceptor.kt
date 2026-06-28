@@ -18,6 +18,7 @@ class HnsWebViewGatewayInterceptor(
     private val hnsGatewayBridge: HnsGatewayBridge = NativeBridge,
     private val allowProxyFallbackForBodyRequests: () -> Boolean = { false },
     private val strictHnsMode: () -> Boolean = { false },
+    private val reportAllHnsStatuses: Boolean = false,
     private val onMainFrameHnsStatus: (Int, HnsPageTlsPolicy?, HnsPageResolverPolicy?, String?) -> Unit = { _, _, _, _ -> },
 ) {
     fun intercept(request: WebResourceRequest): WebResourceResponse? {
@@ -44,7 +45,7 @@ class HnsWebViewGatewayInterceptor(
         isForMainFrame: Boolean,
     ): HnsInterceptedResponse? {
         val response = interceptInternal(method, url, requestHeaders, MAX_HNS_REDIRECTS)
-        if (response != null && isForMainFrame) {
+        if (response != null && (isForMainFrame || reportAllHnsStatuses)) {
             onMainFrameHnsStatus(
                 response.statusCode,
                 response.hnsTlsPolicy(),

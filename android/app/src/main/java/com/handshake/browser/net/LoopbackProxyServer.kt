@@ -1,6 +1,8 @@
 package com.handshake.browser.net
 
 import com.handshake.browser.core.HnsHostPolicy
+import com.handshake.browser.core.HnsPageResolverPolicy
+import com.handshake.browser.core.HnsPageTlsPolicy
 import java.io.Closeable
 import java.io.File
 import java.io.FileInputStream
@@ -25,6 +27,7 @@ class LoopbackProxyServer(
     private val hnsGatewayBridge: HnsGatewayBridge = NativeBridge,
     private val hnsConnectTerminator: HnsConnectTerminator = LocalTlsHnsConnectTerminator(),
     private val strictHnsMode: () -> Boolean = { false },
+    private val onHnsStatus: (String, Int, HnsPageTlsPolicy?, HnsPageResolverPolicy?, String?) -> Unit = { _, _, _, _, _ -> },
     private val executor: ExecutorService = Executors.newCachedThreadPool(),
 ) : Closeable {
     private val running = AtomicBoolean(false)
@@ -187,7 +190,7 @@ class LoopbackProxyServer(
                 body = body,
             )
             if (fileResponse != null) {
-                recordGatewayStatus(target.host, fileResponse.head, "native_file_response")
+                recordGatewayStatus(target.host, fileResponse.head, "native_file_response", request)
                 writeGatewayFileResponse(client.getOutputStream(), fileResponse)
                 return
             }
@@ -201,23 +204,22 @@ class LoopbackProxyServer(
                 headers = gatewayHeaders,
                 body = body,
             ) ?: throw ProxyHttpException(503, "HNS Resolution Unavailable")
-            recordGatewayStatus(target.host, response, "native_response")
+            recordGatewayStatus(target.host, response, "native_response", request)
             client.getOutputStream().write(response)
             client.getOutputStream().flush()
         } catch (error: ProxyHttpException) {
             GatewayEventLog.record("proxy_reject", target.host, error.status, error.reason)
+            onHnsStatus(target.host, error.status, null, null, null)
             throw error
         }
     }
 
-    private fun recordGatewayStatus(host: String, responseHead: ByteArray, stage: String) {
-        val line = responseStatusLine(responseHead)
-        val parts = line.split(' ', limit = 3)
-        val status = parts.getOrNull(1)?.toIntOrNull() ?: 0
-        val reason = parts.getOrNull(2).orEmpty().ifBlank { "unknown" }
-        if (status >= 400 || status == 0) {
-            GatewayEventLog.record(stage, host, status, reason)
+    private fun recordGatewayStatus(host: String, responseHead: ByteArray, stage: String, request: ProxyRequest) {
+        val response = parseGatewayResponseHead(responseHead)
+        if (response.status >= 400 || response.status == 0) {
+            GatewayEventLog.record(stage, host, response.status, response.reason)
         }
+        onHnsStatus(host, response.status, response.hnsTlsPolicy(), response.hnsResolverPolicy(), response.hnsResolutionTrace())
     }
 
     private fun responseStatusLine(responseHead: ByteArray): String {
@@ -230,6 +232,40 @@ class LoopbackProxyServer(
             }
         }
         return String(responseHead, 0, end, StandardCharsets.ISO_8859_1)
+    }
+
+    private fun parseGatewayResponseHead(responseHead: ByteArray): ParsedGatewayResponseHead {
+        val headerText = responseHead
+            .copyOfRange(0, headerEndIndex(responseHead).takeIf { it >= 0 } ?: responseHead.size)
+            .toString(StandardCharsets.ISO_8859_1)
+        val lines = headerText.split("\r\n").filter { it.isNotEmpty() }
+        val statusParts = lines.firstOrNull()?.split(' ', limit = 3).orEmpty()
+        val headers = lines.drop(1)
+            .mapNotNull { line ->
+                val separator = line.indexOf(':')
+                if (separator <= 0) {
+                    null
+                } else {
+                    line.substring(0, separator).trim() to line.substring(separator + 1).trim()
+                }
+            }
+        return ParsedGatewayResponseHead(
+            status = statusParts.getOrNull(1)?.toIntOrNull() ?: 0,
+            reason = statusParts.getOrNull(2).orEmpty().ifBlank { "unknown" },
+            headers = headers,
+        )
+    }
+
+    private fun headerEndIndex(bytes: ByteArray): Int {
+        if (bytes.size < HEADER_END.size) {
+            return -1
+        }
+        for (index in 0..(bytes.size - HEADER_END.size)) {
+            if (HEADER_END.indices.all { offset -> bytes[index + offset] == HEADER_END[offset] }) {
+                return index
+            }
+        }
+        return -1
     }
 
     private fun writeGatewayFileResponse(output: OutputStream, response: HnsGatewayFileResponse) {
@@ -421,6 +457,31 @@ private class ProxyHttpException(
     val reason: String,
 ) : IOException(reason)
 
+private data class ParsedGatewayResponseHead(
+    val status: Int,
+    val reason: String,
+    val headers: List<Pair<String, String>>,
+) {
+    fun hnsTlsPolicy(): HnsPageTlsPolicy? =
+        when (headerValue("X-HNS-TLS-Policy")?.lowercase(Locale.US)) {
+            "dane" -> HnsPageTlsPolicy.Dane
+            "webpki-fallback" -> HnsPageTlsPolicy.WebPkiFallback
+            else -> null
+        }
+
+    fun hnsResolverPolicy(): HnsPageResolverPolicy? =
+        when (headerValue("X-HNS-Resolver-Policy")?.lowercase(Locale.US)) {
+            "hns-doh-compat" -> HnsPageResolverPolicy.HnsDohCompatibility
+            else -> null
+        }
+
+    fun hnsResolutionTrace(): String? =
+        headerValue(HNS_RESOLUTION_TRACE_HEADER)
+
+    private fun headerValue(name: String): String? =
+        headers.firstOrNull { it.first.equals(name, ignoreCase = true) }?.second
+}
+
 internal data class ProxyRequest(
     val line: ProxyRequestLine,
     val headers: List<Pair<String, String>>,
@@ -552,6 +613,30 @@ internal data class ProxyRequest(
     fun isProtocolUpgrade(): Boolean =
         headers.any { it.first.equals("Upgrade", ignoreCase = true) } ||
             headers.any { it.first.equals("Connection", ignoreCase = true) && it.second.hasHeaderToken("upgrade") }
+
+    fun isLikelyMainFrameNavigation(): Boolean {
+        val method = line.method.uppercase(Locale.US)
+        if (method != "GET" && method != "HEAD") {
+            return false
+        }
+        val fetchDest = headerValue("Sec-Fetch-Dest")?.lowercase(Locale.US)
+        if (fetchDest == "document" || fetchDest == "iframe") {
+            return true
+        }
+        val fetchMode = headerValue("Sec-Fetch-Mode")?.lowercase(Locale.US)
+        if (fetchMode == "navigate") {
+            return true
+        }
+        if (headerValue("Upgrade-Insecure-Requests") == "1") {
+            return true
+        }
+        return headerValue("Accept")
+            ?.lowercase(Locale.US)
+            ?.contains("text/html") == true
+    }
+
+    private fun headerValue(name: String): String? =
+        headers.firstOrNull { it.first.equals(name, ignoreCase = true) }?.second
 
     private fun isHopByHopProxyHeader(name: String): Boolean {
         return name.equals("Proxy-Connection", ignoreCase = true) ||

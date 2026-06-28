@@ -1,5 +1,7 @@
 package com.handshake.browser.net
 
+import com.handshake.browser.core.HnsPageResolverPolicy
+import com.handshake.browser.core.HnsPageTlsPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -197,6 +199,60 @@ class LoopbackProxyServerTest {
         assertFalse(text.contains("token"))
         assertFalse(text.contains("secret"))
         assertFalse(text.contains("hi"))
+        dataDir.deleteRecursively()
+    }
+
+    @Test
+    fun hnsDocumentNavigationReportsMainFrameHnsStatus() {
+        val bridge = RecordingGatewayBridge(
+            (
+                "HTTP/1.1 200 OK\r\n" +
+                    "Content-Length: 2\r\n" +
+                    "Connection: close\r\n" +
+                    "X-HNS-TLS-Policy: dane\r\n" +
+                    "X-HNS-Resolver-Policy: hns-doh-compat\r\n" +
+                    "$HNS_RESOLUTION_TRACE_HEADER: {\"fallback\":{\"used\":true}}\r\n\r\nok"
+                ).toByteArray(StandardCharsets.ISO_8859_1),
+        )
+        val reported = ArrayBlockingQueue<ReportedHnsStatus>(1)
+        val dataDir = createTempDirectory("hns-proxy-main-frame-status-test").toFile()
+        LoopbackProxyServer(
+            0,
+            dataDir = dataDir,
+            hnsGatewayBridge = bridge,
+            onHnsStatus = { host, status, tlsPolicy, resolverPolicy, traceJson ->
+                reported.offer(ReportedHnsStatus(host, status, tlsPolicy, resolverPolicy, traceJson))
+            },
+        ).use { proxy ->
+            assertTrue(proxy.start())
+            val port = requireNotNull(proxy.boundPort())
+
+            Socket(InetAddress.getByName("127.0.0.1"), port).use { socket ->
+                socket.getOutputStream().write(
+                    (
+                        "GET http://welcome/ HTTP/1.1\r\n" +
+                            "Host: welcome\r\n" +
+                            "Accept: text/html,application/xhtml+xml\r\n" +
+                            "Sec-Fetch-Mode: navigate\r\n\r\n"
+                        ).toByteArray(StandardCharsets.ISO_8859_1),
+                )
+                socket.getOutputStream().flush()
+
+                val response = socket.getInputStream().readBytes().toString(StandardCharsets.ISO_8859_1)
+                assertTrue(response.startsWith("HTTP/1.1 200 OK\r\n"))
+            }
+        }
+
+        assertEquals(
+            ReportedHnsStatus(
+                "welcome",
+                200,
+                HnsPageTlsPolicy.Dane,
+                HnsPageResolverPolicy.HnsDohCompatibility,
+                """{"fallback":{"used":true}}""",
+            ),
+            reported.poll(1, TimeUnit.SECONDS),
+        )
         dataDir.deleteRecursively()
     }
 
@@ -791,6 +847,14 @@ class LoopbackProxyServerTest {
         val pathAndQuery: String,
         val headers: List<Pair<String, String>>,
         val body: String,
+    )
+
+    private data class ReportedHnsStatus(
+        val host: String,
+        val status: Int,
+        val tlsPolicy: HnsPageTlsPolicy?,
+        val resolverPolicy: HnsPageResolverPolicy?,
+        val traceJson: String?,
     )
 
     private class RecordingGatewayBridge(

@@ -29,11 +29,11 @@ class BrowserSecurityPolicyTest {
     }
 
     @Test
-    fun hnsTargetsShowVerifiedWhenSyncIsReady() {
+    fun hnsTargetsShowLoadingWhenSyncIsReadyButPageIsNotVerified() {
         for (status in listOf("synced", "up_to_date")) {
             assertEquals(
                 status,
-                SecurityState.HnsVerified,
+                SecurityState.Loading,
                 BrowserSecurityPolicy.state(
                     targetKind = BrowserTargetKind.HnsName,
                     proxyAvailable = true,

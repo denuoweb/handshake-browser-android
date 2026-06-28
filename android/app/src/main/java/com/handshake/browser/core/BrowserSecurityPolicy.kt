@@ -34,17 +34,17 @@ object BrowserSecurityPolicy {
             return SecurityState.HnsVerified
         }
         if (
-            !syncStatusJson.isBehindPeerHeight() &&
-            (syncStatusJson.hasSyncStatus("synced") || syncStatusJson.hasSyncStatus("up_to_date"))
-        ) {
-            return SecurityState.HnsVerified
-        }
-        if (
             syncStatusJson.hasSyncStatus("error") ||
             syncStatusJson.hasSyncStatus("seed_failed") ||
             syncStatusJson.hasSyncStatus("peer_failed")
         ) {
             return SecurityState.ProofUnavailable
+        }
+        if (
+            !syncStatusJson.isBehindPeerHeight() &&
+            (syncStatusJson.hasSyncStatus("synced") || syncStatusJson.hasSyncStatus("up_to_date"))
+        ) {
+            return SecurityState.Loading
         }
 
         return SecurityState.Syncing
