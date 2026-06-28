@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import java.io.IOException
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -195,6 +196,218 @@ class LoopbackProxyServerTest {
             ),
             bridge.calls.single(),
         )
+        dataDir.deleteRecursively()
+    }
+
+    @Test
+    fun hnsHttpRequestStreamsNativeGatewayBodyFile() {
+        val bridge = FileGatewayBridge(
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n"
+                .toByteArray(StandardCharsets.ISO_8859_1),
+            "test".toByteArray(StandardCharsets.ISO_8859_1),
+        )
+        val dataDir = createTempDirectory("hns-proxy-file-body-test").toFile()
+        LoopbackProxyServer(0, dataDir = dataDir, hnsGatewayBridge = bridge).use { proxy ->
+            assertTrue(proxy.start())
+            val port = requireNotNull(proxy.boundPort())
+
+            Socket(InetAddress.getByName("127.0.0.1"), port).use { socket ->
+                socket.getOutputStream().write(
+                    "GET http://welcome/file.bin HTTP/1.1\r\nHost: welcome\r\n\r\n"
+                        .toByteArray(StandardCharsets.ISO_8859_1),
+                )
+                socket.getOutputStream().flush()
+
+                val response = socket.getInputStream().readBytes().toString(StandardCharsets.ISO_8859_1)
+                assertEquals("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest", response)
+            }
+        }
+
+        assertEquals(
+            GatewayCall(
+                dataDir.absolutePath,
+                "GET",
+                "http",
+                "welcome",
+                80,
+                "/file.bin",
+                listOf("Host" to "welcome"),
+                "",
+            ),
+            bridge.calls.single(),
+        )
+        assertFalse(bridge.bodyFile.exists())
+        dataDir.deleteRecursively()
+    }
+
+    @Test
+    fun hnsHttpRequestRejectsHostHeaderMismatchBeforeNativeGateway() {
+        val bridge = RecordingGatewayBridge(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                .toByteArray(StandardCharsets.ISO_8859_1),
+        )
+        val dataDir = createTempDirectory("hns-proxy-host-mismatch-test").toFile()
+        LoopbackProxyServer(0, dataDir = dataDir, hnsGatewayBridge = bridge).use { proxy ->
+            assertTrue(proxy.start())
+            val port = requireNotNull(proxy.boundPort())
+
+            Socket(InetAddress.getByName("127.0.0.1"), port).use { socket ->
+                socket.getOutputStream().write(
+                    "GET http://welcome/file.bin HTTP/1.1\r\nHost: othername\r\n\r\n"
+                        .toByteArray(StandardCharsets.ISO_8859_1),
+                )
+                socket.getOutputStream().flush()
+
+                val response = socket.getInputStream().readBytes().toString(StandardCharsets.ISO_8859_1)
+                assertTrue(response.startsWith("HTTP/1.1 400 HNS Host Header Mismatch\r\n"))
+            }
+        }
+
+        assertTrue(bridge.calls.isEmpty())
+        dataDir.deleteRecursively()
+    }
+
+    @Test
+    fun hnsChunkedPostRequestDecodesBodyBeforeNativeGateway() {
+        val bridge = RecordingGatewayBridge(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                .toByteArray(StandardCharsets.ISO_8859_1),
+        )
+        val dataDir = createTempDirectory("hns-proxy-chunked-test").toFile()
+        LoopbackProxyServer(0, dataDir = dataDir, hnsGatewayBridge = bridge).use { proxy ->
+            assertTrue(proxy.start())
+            val port = requireNotNull(proxy.boundPort())
+
+            Socket(InetAddress.getByName("127.0.0.1"), port).use { socket ->
+                socket.getOutputStream().write(
+                    (
+                        "POST http://welcome/upload HTTP/1.1\r\n" +
+                            "Host: welcome\r\n" +
+                            "Content-Type: text/plain\r\n" +
+                            "Transfer-Encoding: chunked\r\n\r\n" +
+                            "2\r\nhi\r\n" +
+                            "1;ext=value\r\n!\r\n" +
+                            "0\r\nX-Trailer: ignored\r\n\r\n"
+                        ).toByteArray(StandardCharsets.ISO_8859_1),
+                )
+                socket.getOutputStream().flush()
+
+                val response = socket.getInputStream().readBytes().toString(StandardCharsets.ISO_8859_1)
+                assertTrue(response.startsWith("HTTP/1.1 200 OK\r\n"))
+            }
+        }
+
+        assertEquals(
+            GatewayCall(
+                dataDir.absolutePath,
+                "POST",
+                "http",
+                "welcome",
+                80,
+                "/upload",
+                listOf("Host" to "welcome", "Content-Type" to "text/plain"),
+                "hi!",
+            ),
+            bridge.calls.single(),
+        )
+        dataDir.deleteRecursively()
+    }
+
+    @Test
+    fun hnsChunkedPostRejectsContentLengthAmbiguityBeforeNativeGateway() {
+        val bridge = RecordingGatewayBridge(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                .toByteArray(StandardCharsets.ISO_8859_1),
+        )
+        val dataDir = createTempDirectory("hns-proxy-chunked-cl-test").toFile()
+        LoopbackProxyServer(0, dataDir = dataDir, hnsGatewayBridge = bridge).use { proxy ->
+            assertTrue(proxy.start())
+            val port = requireNotNull(proxy.boundPort())
+
+            Socket(InetAddress.getByName("127.0.0.1"), port).use { socket ->
+                socket.getOutputStream().write(
+                    (
+                        "POST http://welcome/upload HTTP/1.1\r\n" +
+                            "Host: welcome\r\n" +
+                            "Content-Length: 0\r\n" +
+                            "Transfer-Encoding: chunked\r\n\r\n" +
+                            "2\r\nhi\r\n0\r\n\r\n"
+                        ).toByteArray(StandardCharsets.ISO_8859_1),
+                )
+                socket.getOutputStream().flush()
+
+                val response = socket.getInputStream().readBytes().toString(StandardCharsets.ISO_8859_1)
+                assertTrue(response.startsWith("HTTP/1.1 400 Bad Request Framing\r\n"))
+            }
+        }
+
+        assertTrue(bridge.calls.isEmpty())
+        dataDir.deleteRecursively()
+    }
+
+    @Test
+    fun hnsChunkedPostRejectsMalformedChunkBeforeNativeGateway() {
+        val bridge = RecordingGatewayBridge(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                .toByteArray(StandardCharsets.ISO_8859_1),
+        )
+        val dataDir = createTempDirectory("hns-proxy-bad-chunk-test").toFile()
+        LoopbackProxyServer(0, dataDir = dataDir, hnsGatewayBridge = bridge).use { proxy ->
+            assertTrue(proxy.start())
+            val port = requireNotNull(proxy.boundPort())
+
+            Socket(InetAddress.getByName("127.0.0.1"), port).use { socket ->
+                socket.getOutputStream().write(
+                    (
+                        "POST http://welcome/upload HTTP/1.1\r\n" +
+                            "Host: welcome\r\n" +
+                            "Transfer-Encoding: chunked\r\n\r\n" +
+                            "z\r\nhi\r\n0\r\n\r\n"
+                        ).toByteArray(StandardCharsets.ISO_8859_1),
+                )
+                socket.getOutputStream().flush()
+
+                val response = socket.getInputStream().readBytes().toString(StandardCharsets.ISO_8859_1)
+                assertTrue(response.startsWith("HTTP/1.1 400 Bad Chunked Body\r\n"))
+            }
+        }
+
+        assertTrue(bridge.calls.isEmpty())
+        dataDir.deleteRecursively()
+    }
+
+    @Test
+    fun hnsConnectRejectsTunneledHostHeaderMismatchBeforeNativeGateway() {
+        val bridge = RecordingGatewayBridge(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                .toByteArray(StandardCharsets.ISO_8859_1),
+        )
+        val dataDir = createTempDirectory("hns-proxy-connect-host-mismatch-test").toFile()
+        LoopbackProxyServer(
+            0,
+            dataDir = dataDir,
+            hnsGatewayBridge = bridge,
+            hnsConnectTerminator = PassthroughConnectTerminator,
+        ).use { proxy ->
+            assertTrue(proxy.start())
+            val port = requireNotNull(proxy.boundPort())
+
+            Socket(InetAddress.getByName("127.0.0.1"), port).use { socket ->
+                socket.getOutputStream().write(
+                    (
+                        "CONNECT welcome:443 HTTP/1.1\r\nHost: welcome:443\r\n\r\n" +
+                            "GET /file.bin HTTP/1.1\r\nHost: othername\r\n\r\n"
+                        ).toByteArray(StandardCharsets.ISO_8859_1),
+                )
+                socket.getOutputStream().flush()
+
+                val response = socket.getInputStream().readBytes().toString(StandardCharsets.ISO_8859_1)
+                assertTrue(response.startsWith("HTTP/1.1 200 Connection Established\r\n"))
+                assertTrue(response.contains("HTTP/1.1 400 HNS Host Header Mismatch\r\n"))
+            }
+        }
+
+        assertTrue(bridge.calls.isEmpty())
         dataDir.deleteRecursively()
     }
 
@@ -437,7 +650,7 @@ class LoopbackProxyServerTest {
 
             Socket(InetAddress.getByName("127.0.0.1"), port).use { socket ->
                 socket.getOutputStream().write(
-                    "POST http://welcome/path HTTP/1.1\r\nHost: welcome\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"
+                    "POST http://welcome/path HTTP/1.1\r\nHost: welcome\r\nTransfer-Encoding: gzip\r\n\r\nhi"
                         .toByteArray(StandardCharsets.ISO_8859_1),
                 )
                 socket.getOutputStream().flush()
@@ -515,6 +728,52 @@ class LoopbackProxyServerTest {
                 body.toString(StandardCharsets.ISO_8859_1),
             )
             return response
+        }
+    }
+
+    private class FileGatewayBridge(
+        private val responseHead: ByteArray,
+        private val responseBody: ByteArray,
+    ) : HnsGatewayBridge {
+        val calls = mutableListOf<GatewayCall>()
+        lateinit var bodyFile: File
+
+        override fun httpResponse(
+            dataDir: String,
+            method: String,
+            scheme: String,
+            host: String,
+            port: Int,
+            pathAndQuery: String,
+            headers: List<Pair<String, String>>,
+            body: ByteArray,
+        ): ByteArray {
+            error("byte-array fallback should not be used")
+        }
+
+        override fun httpResponseBodyFile(
+            dataDir: String,
+            method: String,
+            scheme: String,
+            host: String,
+            port: Int,
+            pathAndQuery: String,
+            headers: List<Pair<String, String>>,
+            body: ByteArray,
+        ): HnsGatewayFileResponse {
+            bodyFile = File.createTempFile("hns-test-", ".body", File(dataDir))
+            bodyFile.writeBytes(responseBody)
+            calls += GatewayCall(
+                dataDir,
+                method,
+                scheme,
+                host,
+                port,
+                pathAndQuery,
+                headers,
+                body.toString(StandardCharsets.ISO_8859_1),
+            )
+            return HnsGatewayFileResponse(responseHead, bodyFile)
         }
     }
 

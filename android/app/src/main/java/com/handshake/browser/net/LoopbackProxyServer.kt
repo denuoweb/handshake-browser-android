@@ -3,6 +3,7 @@ package com.handshake.browser.net
 import com.handshake.browser.core.HnsHostPolicy
 import java.io.Closeable
 import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -70,7 +71,7 @@ class LoopbackProxyServer(
             runCatching {
                 clientSocket.soTimeout = SOCKET_TIMEOUT_MS
                 val request = readProxyRequest(clientSocket.getInputStream())
-                request.validateSupportedFraming()
+                request.validatedContentLength()
                 when (request.line.method.uppercase(Locale.US)) {
                     "CONNECT" -> handleConnect(clientSocket, request)
                     else -> handleHttp(clientSocket, request)
@@ -115,7 +116,7 @@ class LoopbackProxyServer(
         securedClient.use { tlsClient ->
             runCatching {
                 val tunneledRequest = readProxyRequest(tlsClient.getInputStream())
-                tunneledRequest.validateSupportedFraming()
+                tunneledRequest.validatedContentLength()
                 val httpTarget = tunneledRequest.line.toConnectedHttpTarget(target)
                 if (!requiresHnsResolution(httpTarget.host)) {
                     throw ProxyHttpException(400, "HNS Request Mismatch")
@@ -133,11 +134,12 @@ class LoopbackProxyServer(
 
     private fun handleHttp(client: Socket, request: ProxyRequest) {
         val target = request.line.toHttpTarget()
-        val contentLength = request.validatedContentLength()
         if (requiresHnsResolution(target.host)) {
             handleHnsGatewayHttp(client, request, target)
             return
         }
+        request.rejectTransferEncoding()
+        val contentLength = request.validatedContentLength()
         if (request.isProtocolUpgrade()) {
             if (contentLength != 0L) {
                 throw ProxyHttpException(400, "Protocol Upgrade Request Invalid")
@@ -168,11 +170,23 @@ class LoopbackProxyServer(
         if (request.isProtocolUpgrade() || target.scheme.equals("ws", ignoreCase = true) || target.scheme.equals("wss", ignoreCase = true)) {
             throw ProxyHttpException(501, "HNS Protocol Upgrade Unsupported")
         }
-        val contentLength = request.validatedContentLength()
-        if (contentLength > MAX_HNS_BODY_BYTES) {
-            throw ProxyHttpException(413, "Payload Too Large")
+        request.validateHostHeaderMatches(target)
+        val body = readHnsRequestBody(client.getInputStream(), request)
+        val gatewayHeaders = request.headersForGateway()
+        val fileResponse = hnsGatewayBridge.httpResponseBodyFile(
+            dataDir = dataDir.absolutePath,
+            method = request.line.method,
+            scheme = target.scheme,
+            host = target.host,
+            port = target.port,
+            pathAndQuery = target.pathAndQuery,
+            headers = gatewayHeaders,
+            body = body,
+        )
+        if (fileResponse != null) {
+            writeGatewayFileResponse(client.getOutputStream(), fileResponse)
+            return
         }
-        val body = readFixed(client.getInputStream(), contentLength)
         val response = hnsGatewayBridge.httpResponse(
             dataDir = dataDir.absolutePath,
             method = request.line.method,
@@ -180,11 +194,41 @@ class LoopbackProxyServer(
             host = target.host,
             port = target.port,
             pathAndQuery = target.pathAndQuery,
-            headers = request.headers,
+            headers = gatewayHeaders,
             body = body,
         ) ?: throw ProxyHttpException(503, "HNS Resolution Unavailable")
         client.getOutputStream().write(response)
         client.getOutputStream().flush()
+    }
+
+    private fun writeGatewayFileResponse(output: OutputStream, response: HnsGatewayFileResponse) {
+        try {
+            output.write(response.head)
+            FileInputStream(response.bodyFile).use { body ->
+                copy(body, output)
+            }
+            output.flush()
+        } finally {
+            response.bodyFile.delete()
+        }
+    }
+
+    private fun readHnsRequestBody(input: InputStream, request: ProxyRequest): ByteArray {
+        if (request.hasTransferEncoding()) {
+            if (request.hasContentLength()) {
+                throw ProxyHttpException(400, "Bad Request Framing")
+            }
+            if (!request.hasSingleChunkedTransferEncoding()) {
+                throw ProxyHttpException(501, "Transfer Encoding Unsupported")
+            }
+            return readChunked(input, MAX_HNS_BODY_BYTES)
+        }
+
+        val contentLength = request.validatedContentLength()
+        if (contentLength > MAX_HNS_BODY_BYTES) {
+            throw ProxyHttpException(413, "Payload Too Large")
+        }
+        return readFixed(input, contentLength)
     }
 
     private fun tunnel(client: Socket, origin: Socket) {
@@ -241,6 +285,63 @@ class LoopbackProxyServer(
         return output.toByteArray()
     }
 
+    private fun readChunked(input: InputStream, limit: Long): ByteArray {
+        val output = java.io.ByteArrayOutputStream()
+        var total = 0L
+        while (true) {
+            val sizeLine = readAsciiLine(input, MAX_CHUNK_LINE_BYTES)
+            val sizeText = sizeLine.substringBefore(';').trim()
+            if (sizeText.isEmpty()) {
+                throw ProxyHttpException(400, "Bad Chunked Body")
+            }
+            val size = sizeText.toLongOrNull(16)
+                ?.takeIf { it >= 0 }
+                ?: throw ProxyHttpException(400, "Bad Chunked Body")
+            if (size == 0L) {
+                readChunkTrailers(input)
+                return output.toByteArray()
+            }
+            if (size > limit - total) {
+                throw ProxyHttpException(413, "Payload Too Large")
+            }
+            total += size
+            copyFixedTo(input, output, size)
+            if (input.read() != '\r'.code || input.read() != '\n'.code) {
+                throw ProxyHttpException(400, "Bad Chunked Body")
+            }
+        }
+    }
+
+    private fun readChunkTrailers(input: InputStream) {
+        var trailerBytes = 0
+        while (true) {
+            val line = readAsciiLine(input, MAX_CHUNK_LINE_BYTES)
+            trailerBytes += line.length
+            if (trailerBytes > MAX_CHUNK_TRAILER_BYTES) {
+                throw ProxyHttpException(400, "Bad Chunked Body")
+            }
+            if (line.isEmpty()) {
+                return
+            }
+        }
+    }
+
+    private fun readAsciiLine(input: InputStream, maxBytes: Int): String {
+        val bytes = java.io.ByteArrayOutputStream()
+        var previous = -1
+        while (bytes.size() < maxBytes) {
+            val next = input.read()
+            if (next < 0) throw ProxyHttpException(400, "Bad Chunked Body")
+            if (previous == '\r'.code && next == '\n'.code) {
+                val line = bytes.toByteArray()
+                return String(line, 0, line.size - 1, StandardCharsets.ISO_8859_1)
+            }
+            bytes.write(next)
+            previous = next
+        }
+        throw ProxyHttpException(400, "Bad Chunked Body")
+    }
+
     private fun copyFixedTo(input: InputStream, output: OutputStream, length: Long) {
         var remaining = length
         val buffer = ByteArray(COPY_BUFFER_BYTES)
@@ -272,6 +373,8 @@ class LoopbackProxyServer(
         private const val LOOPBACK = "127.0.0.1"
         private const val MAX_HEADER_BYTES = 64 * 1024
         private const val MAX_HNS_BODY_BYTES = 1024 * 1024L
+        private const val MAX_CHUNK_LINE_BYTES = 8 * 1024
+        private const val MAX_CHUNK_TRAILER_BYTES = 64 * 1024
         private const val COPY_BUFFER_BYTES = 16 * 1024
         private const val SOCKET_TIMEOUT_MS = 30_000
         private const val CONNECT_TIMEOUT_MS = 10_000
@@ -291,10 +394,29 @@ internal data class ProxyRequest(
     val headers: List<Pair<String, String>>,
 ) {
     fun validateSupportedFraming() {
-        if (headers.any { it.first.equals("Transfer-Encoding", ignoreCase = true) }) {
+        rejectTransferEncoding()
+        validatedContentLength()
+    }
+
+    fun rejectTransferEncoding() {
+        if (hasTransferEncoding()) {
             throw ProxyHttpException(501, "Transfer Encoding Unsupported")
         }
-        validatedContentLength()
+    }
+
+    fun hasTransferEncoding(): Boolean =
+        headers.any { it.first.equals("Transfer-Encoding", ignoreCase = true) }
+
+    fun hasContentLength(): Boolean =
+        headers.any { it.first.equals("Content-Length", ignoreCase = true) }
+
+    fun hasSingleChunkedTransferEncoding(): Boolean {
+        val tokens = headers
+            .filter { it.first.equals("Transfer-Encoding", ignoreCase = true) }
+            .flatMap { it.second.split(',') }
+            .map { it.trim().lowercase(Locale.US) }
+            .filter { it.isNotEmpty() }
+        return tokens.size == 1 && tokens.single() == "chunked"
     }
 
     fun validatedContentLength(): Long {
@@ -315,6 +437,34 @@ internal data class ProxyRequest(
             throw ProxyHttpException(400, "Bad Content-Length")
         }
         return first
+    }
+
+    fun validateHostHeaderMatches(target: HttpTarget) {
+        val values = headers
+            .filter { it.first.equals("Host", ignoreCase = true) }
+            .map { it.second }
+        if (values.isEmpty()) {
+            return
+        }
+        if (values.size != 1) {
+            throw ProxyHttpException(400, "HNS Host Header Mismatch")
+        }
+
+        val authority = HostHeaderAuthority.parse(values.single(), target.defaultPort())
+            ?: throw ProxyHttpException(400, "HNS Host Header Mismatch")
+        if (!sameHost(authority.host, target.host) || authority.port != target.port) {
+            throw ProxyHttpException(400, "HNS Host Header Mismatch")
+        }
+    }
+
+    fun headersForGateway(): List<Pair<String, String>> {
+        if (!hasTransferEncoding()) {
+            return headers
+        }
+        return headers
+            .filterNot { it.first.equals("Transfer-Encoding", ignoreCase = true) }
+            .filterNot { it.first.equals("Trailer", ignoreCase = true) }
+            .filterNot { it.first.equals("Content-Length", ignoreCase = true) }
     }
 
     fun toOriginBytes(target: HttpTarget): ByteArray {
@@ -429,14 +579,58 @@ internal data class HttpTarget(
     val port: Int,
     val pathAndQuery: String,
 ) {
-    fun hostHeader(): String {
-        val defaultPort = if (scheme.equals("https", ignoreCase = true) || scheme.equals("wss", ignoreCase = true)) {
+    fun defaultPort(): Int {
+        return if (scheme.equals("https", ignoreCase = true) || scheme.equals("wss", ignoreCase = true)) {
             443
         } else {
             80
         }
+    }
+
+    fun hostHeader(): String {
         val bracketedHost = if (host.contains(':') && !host.startsWith("[")) "[$host]" else host
-        return if (port == defaultPort) bracketedHost else "$bracketedHost:$port"
+        return if (port == defaultPort()) bracketedHost else "$bracketedHost:$port"
+    }
+}
+
+private data class HostHeaderAuthority(
+    val host: String,
+    val port: Int,
+) {
+    companion object {
+        fun parse(value: String, defaultPort: Int): HostHeaderAuthority? {
+            val authority = value.trim()
+            if (authority.isEmpty()) {
+                return null
+            }
+            if (authority.startsWith("[")) {
+                val close = authority.indexOf(']')
+                if (close <= 0) return null
+                val host = authority.substring(1, close)
+                val suffix = authority.substring(close + 1)
+                val port = if (suffix.isEmpty()) {
+                    defaultPort
+                } else {
+                    if (!suffix.startsWith(":")) return null
+                    suffix.drop(1).toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+                }
+                return HostHeaderAuthority(host, port)
+            }
+
+            val separator = authority.lastIndexOf(':')
+            if (separator < 0) {
+                return HostHeaderAuthority(authority, defaultPort)
+            }
+            if (authority.indexOf(':') != separator) {
+                return null
+            }
+            val host = authority.substring(0, separator)
+            if (host.isEmpty()) {
+                return null
+            }
+            val port = authority.substring(separator + 1).toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+            return HostHeaderAuthority(host, port)
+        }
     }
 }
 
