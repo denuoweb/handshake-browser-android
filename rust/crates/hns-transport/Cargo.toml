@@ -8,8 +8,11 @@ rust-version.workspace = true
 [dependencies]
 bytes.workspace = true
 h2.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
 hns-dane.workspace = true
 http.workspace = true
+quinn.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }

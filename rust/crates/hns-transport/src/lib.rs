@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use hns_dane::{
     DaneCertificateChainValidationInput, DaneDecision, DaneError, DomainTrustMode, TlsaRecord,
     WebPkiStatus, evaluate_policy_with_certificate_chain,
@@ -12,7 +12,7 @@ use rustls::{
 };
 use rustls::{Error as RustlsError, StreamOwned};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -82,6 +82,10 @@ pub enum TransportError {
     UnsupportedUpgrade,
     #[error("origin HTTP/2 error: {0}")]
     Http2(String),
+    #[error("origin HTTP/3 error: {0}")]
+    Http3(String),
+    #[error("origin QUIC error: {0}")]
+    Quic(String),
     #[error("origin TLS error: {0}")]
     Tls(String),
     #[error("origin request is invalid")]
@@ -425,6 +429,142 @@ impl TcpHttpTransport {
         })
     }
 
+    fn fetch_https_http3(&self, request: &OriginRequest) -> Result<OriginResponse, TransportError> {
+        let mut body = Vec::new();
+        let head = self.fetch_https_http3_to_writer(request, &mut body)?;
+        Ok(OriginResponse {
+            status: head.status,
+            headers: head.headers,
+            body,
+            dane_decision: head.dane_decision,
+        })
+    }
+
+    fn fetch_https_http3_to_writer(
+        &self,
+        request: &OriginRequest,
+        body: &mut dyn Write,
+    ) -> Result<OriginResponseHead, TransportError> {
+        validate_request(request, self.limits)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(io_error)?;
+        runtime.block_on(self.fetch_https_http3_to_writer_async(request, body))
+    }
+
+    async fn fetch_https_http3_to_writer_async(
+        &self,
+        request: &OriginRequest,
+        body: &mut dyn Write,
+    ) -> Result<OriginResponseHead, TransportError> {
+        self.fetch_https_http3_to_writer_inner(request, body).await
+    }
+
+    async fn fetch_https_http3_to_writer_inner(
+        &self,
+        request: &OriginRequest,
+        body: &mut dyn Write,
+    ) -> Result<OriginResponseHead, TransportError> {
+        let connection_host = request.connect_host.as_deref().unwrap_or(&request.host);
+        let remote = resolve_socket_addr_async(connection_host, request.port).await?;
+
+        let decision = Arc::new(Mutex::new(None));
+        let config = self.client_config(
+            request.tls.clone(),
+            Arc::clone(&decision),
+            vec![b"h3".to_vec()],
+        )?;
+        let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(config)
+            .map_err(|error| TransportError::Tls(error.to_string()))?;
+        let mut endpoint = quinn::Endpoint::client(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)))
+            .map_err(io_error)?;
+        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic_config)));
+
+        let connecting = endpoint
+            .connect(remote, &request.host)
+            .map_err(quic_error)?;
+        let connection = http3_timeout(self.connect_timeout, "connect", connecting)
+            .await?
+            .map_err(quic_error)?;
+        let close_connection = connection.clone();
+        let quic = h3_quinn::Connection::new(connection);
+        let (mut driver, mut sender) = http3_timeout(
+            self.read_timeout,
+            "connection setup",
+            h3::client::builder()
+                .max_field_section_size(self.limits.max_response_header_bytes as u64)
+                .build(quic),
+        )
+        .await?
+        .map_err(h3_connection_error)?;
+        let driver_task =
+            tokio::spawn(async move { std::future::poll_fn(|cx| driver.poll_close(cx)).await });
+
+        let h3_request = build_http2_request(request)?;
+        let mut request_stream = http3_timeout(
+            self.read_timeout,
+            "send request",
+            sender.send_request(h3_request),
+        )
+        .await?
+        .map_err(h3_stream_error)?;
+        if !request.body.is_empty() {
+            http3_timeout(
+                self.read_timeout,
+                "send request body",
+                request_stream.send_data(Bytes::copy_from_slice(&request.body)),
+            )
+            .await?
+            .map_err(h3_stream_error)?;
+        }
+        http3_timeout(self.read_timeout, "finish request", request_stream.finish())
+            .await?
+            .map_err(h3_stream_error)?;
+
+        let response = http3_timeout(
+            self.read_timeout,
+            "receive response headers",
+            request_stream.recv_response(),
+        )
+        .await?
+        .map_err(h3_stream_error)?;
+        let status = response.status().as_u16();
+        let headers = http2_response_headers(response.headers())?;
+        if transfer_encoding(&headers)?.is_some() {
+            return Err(TransportError::MalformedResponse);
+        }
+        let expected_body_len = content_length(&headers)?;
+        let body_len = if response_has_no_body(&request.method, status) {
+            0
+        } else {
+            http3_timeout(
+                self.read_timeout,
+                "receive response body",
+                read_http3_body_to_writer(
+                    &mut request_stream,
+                    self.limits.max_response_body_bytes,
+                    body,
+                ),
+            )
+            .await??
+        };
+        if expected_body_len.is_some_and(|expected| expected != body_len) {
+            return Err(TransportError::MalformedResponse);
+        }
+
+        driver_task.abort();
+        close_connection.close(0u32.into(), b"done");
+
+        Ok(OriginResponseHead {
+            status,
+            headers,
+            body_len,
+            dane_decision: tls_decision(decision)?,
+        })
+    }
+
     fn client_config(
         &self,
         tls: TlsValidation,
@@ -470,7 +610,8 @@ impl OriginTransport for TcpHttpTransport {
             ("http", OriginProtocol::Http11) => self.fetch_http11(request),
             ("https", OriginProtocol::Http11) => self.fetch_https_http11(request),
             ("https", OriginProtocol::Http2) => self.fetch_https_http2(request),
-            ("http", _) | ("https", _) => Err(TransportError::UnsupportedTransport),
+            ("https", OriginProtocol::Http3) => self.fetch_https_http3(request),
+            ("http", _) => Err(TransportError::UnsupportedTransport),
             _ => Err(TransportError::UnsupportedScheme),
         }
     }
@@ -487,7 +628,8 @@ impl OriginTransport for TcpHttpTransport {
             ("http", OriginProtocol::Http11) => self.fetch_http11_to_writer(request, body),
             ("https", OriginProtocol::Http11) => self.fetch_https_http11_to_writer(request, body),
             ("https", OriginProtocol::Http2) => self.fetch_https_http2_to_writer(request, body),
-            ("http", _) | ("https", _) => Err(TransportError::UnsupportedTransport),
+            ("https", OriginProtocol::Http3) => self.fetch_https_http3_to_writer(request, body),
+            ("http", _) => Err(TransportError::UnsupportedTransport),
             _ => Err(TransportError::UnsupportedScheme),
         }
     }
@@ -617,6 +759,14 @@ async fn connect_async(
         .unwrap_or_else(|| TransportError::Io("no resolved socket addresses".to_owned())))
 }
 
+async fn resolve_socket_addr_async(host: &str, port: u16) -> Result<SocketAddr, TransportError> {
+    tokio::net::lookup_host((host, port))
+        .await
+        .map_err(io_error)?
+        .next()
+        .ok_or_else(|| TransportError::Io("no resolved socket addresses".to_owned()))
+}
+
 fn build_http2_request(request: &OriginRequest) -> Result<Http2Request<()>, TransportError> {
     let authority = host_header(&request.host, request.port, &request.scheme);
     let uri = format!(
@@ -689,6 +839,34 @@ async fn read_http2_body_to_writer(
             .map_err(h2_error)?;
     }
     Ok(total)
+}
+
+async fn read_http3_body_to_writer<S>(
+    stream: &mut h3::client::RequestStream<S, Bytes>,
+    limit: usize,
+    body: &mut dyn Write,
+) -> Result<usize, TransportError>
+where
+    S: h3::quic::RecvStream,
+{
+    let mut total = 0usize;
+    while let Some(mut chunk) = stream.recv_data().await.map_err(h3_stream_error)? {
+        let chunk_len = chunk.remaining();
+        total = checked_body_len(total, chunk_len, limit)?;
+        let bytes = chunk.copy_to_bytes(chunk_len);
+        body.write_all(&bytes).map_err(io_error)?;
+    }
+    Ok(total)
+}
+
+async fn http3_timeout<T>(
+    timeout: Duration,
+    stage: &'static str,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, TransportError> {
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| TransportError::Io(format!("HTTP/3 {stage} timed out")))
 }
 
 fn validate_request(
@@ -1120,6 +1298,18 @@ fn h2_error(error: h2::Error) -> TransportError {
     TransportError::Http2(error.to_string())
 }
 
+fn h3_connection_error(error: h3::error::ConnectionError) -> TransportError {
+    TransportError::Http3(error.to_string())
+}
+
+fn h3_stream_error(error: h3::error::StreamError) -> TransportError {
+    TransportError::Http3(error.to_string())
+}
+
+fn quic_error(error: impl std::fmt::Display) -> TransportError {
+    TransportError::Quic(error.to_string())
+}
+
 fn tls_decision(
     decision: Arc<Mutex<Option<DaneDecision>>>,
 ) -> Result<DaneDecision, TransportError> {
@@ -1137,7 +1327,7 @@ mod tests {
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::{ServerConfig, ServerConnection};
     use std::io::Read;
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
     use std::sync::mpsc;
     use std::thread;
 
@@ -1404,6 +1594,32 @@ mod tests {
     }
 
     #[test]
+    fn fetches_https_http3_with_dnssec_tlsa_match() {
+        let server = TlsTestServer::start_h3();
+        let transport = TcpHttpTransport::new(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            TransportLimits::default(),
+        );
+        let mut request = request(server.address);
+        request.scheme = "https".to_owned();
+        request.protocol = OriginProtocol::Http3;
+        request.tls = TlsValidation::hns_strict(true, vec![tlsa_spki_exact(&server.cert_der)]);
+
+        let response = transport.fetch(&request).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+        assert_eq!(
+            response.dane_decision,
+            DaneDecision::Matched(TlsaUsage::DaneEe),
+        );
+        let request_text = server.request();
+        assert!(request_text.starts_with("GET https://example.com:"));
+        assert!(request_text.ends_with("/path?q=1"));
+    }
+
+    #[test]
     fn fetches_https_with_dane_ta_intermediate_match() {
         let server = TlsTestServer::start_with_intermediate();
         let transport = TcpHttpTransport::new(
@@ -1626,6 +1842,81 @@ mod tests {
                     }
                 });
             });
+
+            Self {
+                address,
+                cert_der,
+                intermediate_cert_der: None,
+                request_rx,
+            }
+        }
+
+        fn start_h3() -> Self {
+            let rcgen::CertifiedKey { cert, signing_key } =
+                rcgen::generate_simple_self_signed(vec!["example.com".to_owned()]).unwrap();
+            let cert_der = cert.der().to_vec();
+            let key_der =
+                PrivateKeyDer::from(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+            let mut config = ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(cert_der.clone())], key_der)
+            .unwrap();
+            config.alpn_protocols = vec![b"h3".to_vec()];
+
+            let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+                quinn::crypto::rustls::QuicServerConfig::try_from(config).unwrap(),
+            ));
+            let (address_tx, address_rx) = mpsc::channel();
+            let (request_tx, request_rx) = mpsc::channel();
+
+            thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let endpoint = quinn::Endpoint::server(
+                        server_config,
+                        SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+                    )
+                    .unwrap();
+                    address_tx.send(endpoint.local_addr().unwrap()).unwrap();
+                    let connecting = endpoint.accept().await.unwrap();
+                    let connection = connecting.await.unwrap();
+                    let quic = h3_quinn::Connection::new(connection);
+                    let mut connection = h3::server::builder().build(quic).await.unwrap();
+                    if let Some(request) = connection.accept().await.unwrap() {
+                        let handler = tokio::spawn(async move {
+                            let (request, mut stream) = request.resolve_request().await.unwrap();
+                            request_tx
+                                .send(format!("{} {}", request.method(), request.uri()))
+                                .unwrap();
+                            let response = http::Response::builder()
+                                .status(200)
+                                .header("content-length", "2")
+                                .header("x-test", "h3")
+                                .body(())
+                                .unwrap();
+                            stream.send_response(response).await.unwrap();
+                            stream.send_data(Bytes::from_static(b"ok")).await.unwrap();
+                            stream.finish().await.unwrap();
+                        });
+                        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                            while let Ok(Some(_)) = connection.accept().await {
+                                // Drive the connection while the spawned request handler writes.
+                            }
+                        })
+                        .await;
+                        handler.await.unwrap();
+                    }
+                });
+            });
+            let address = address_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
             Self {
                 address,

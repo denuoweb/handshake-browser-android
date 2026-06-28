@@ -83,7 +83,11 @@ impl Default for GatewayConfig {
             auth_token: None,
             require_secure_resolution: true,
             hns_https_mode: HnsHttpsMode::Strict,
-            supported_origin_protocols: vec![OriginProtocol::Http11, OriginProtocol::Http2],
+            supported_origin_protocols: vec![
+                OriginProtocol::Http11,
+                OriginProtocol::Http2,
+                OriginProtocol::Http3,
+            ],
         }
     }
 }
