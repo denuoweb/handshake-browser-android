@@ -628,7 +628,6 @@ fn fallback_cache_root(request: &ResolutionRequest) -> String {
 
 #[derive(Clone, Debug)]
 struct HnsDohResolver {
-    transport: TcpHttpTransport,
     host: String,
     path: String,
     trace: DnsTraceRecorder,
@@ -643,7 +642,6 @@ impl Default for HnsDohResolver {
 impl HnsDohResolver {
     fn new(trace: DnsTraceRecorder) -> Self {
         Self {
-            transport: TcpHttpTransport::default(),
             host: HNS_DOH_HOST.to_owned(),
             path: HNS_DOH_PATH.to_owned(),
             trace,
@@ -659,7 +657,7 @@ impl Resolver for HnsDohResolver {
         let id = next_doh_query_id();
         let query = build_doh_query(id, &qname, qtype)?;
         let started = Instant::now();
-        let response = self.transport.fetch(&OriginRequest {
+        let response = TcpHttpTransport::default().fetch(&OriginRequest {
             method: "POST".to_owned(),
             scheme: "https".to_owned(),
             host: self.host.clone(),

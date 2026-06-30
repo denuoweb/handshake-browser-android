@@ -321,7 +321,7 @@ impl TcpHttpTransport {
         let connection_host = request.connect_host.as_deref().unwrap_or(&request.host);
         let mut stream = connect(connection_host, request.port, self.connect_timeout)?;
         stream
-            .set_read_timeout(Some(TUNNEL_READ_TIMEOUT))
+            .set_read_timeout(Some(self.read_timeout))
             .map_err(io_error)?;
         stream
             .set_write_timeout(Some(self.read_timeout))
@@ -382,7 +382,7 @@ impl TcpHttpTransport {
         let connection_host = request.connect_host.as_deref().unwrap_or(&request.host);
         let stream = connect(connection_host, request.port, self.connect_timeout)?;
         stream
-            .set_read_timeout(Some(TUNNEL_READ_TIMEOUT))
+            .set_read_timeout(Some(self.read_timeout))
             .map_err(io_error)?;
         stream
             .set_write_timeout(Some(self.read_timeout))
@@ -2027,6 +2027,24 @@ mod tests {
     }
 
     #[test]
+    fn http_fetch_waits_longer_than_tunnel_idle_timeout() {
+        let server = TestServer::start_delayed(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
+            TUNNEL_READ_TIMEOUT + Duration::from_millis(150),
+        );
+        let transport = TcpHttpTransport::new(
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            TransportLimits::default(),
+        );
+
+        let response = transport.fetch(&request(server.address)).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+    }
+
+    #[test]
     fn decodes_chunked_response_body() {
         let server = TestServer::start(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n".to_vec(),
@@ -2501,6 +2519,10 @@ mod tests {
 
     impl TestServer {
         fn start(response: Vec<u8>) -> Self {
+            Self::start_delayed(response, Duration::ZERO)
+        }
+
+        fn start_delayed(response: Vec<u8>, delay: Duration) -> Self {
             let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
             let address = listener.local_addr().unwrap();
             let (request_tx, request_rx) = mpsc::channel();
@@ -2522,6 +2544,9 @@ mod tests {
                 request_tx
                     .send(String::from_utf8_lossy(&request).into_owned())
                     .unwrap();
+                if !delay.is_zero() {
+                    thread::sleep(delay);
+                }
                 stream.write_all(&response).unwrap();
             });
 

@@ -163,16 +163,11 @@ class MainActivity : ComponentActivity() {
             imeOptions = EditorInfo.IME_ACTION_GO
             setSelectAllOnFocus(true)
             setOnEditorActionListener { _, actionId, event ->
-                val enterKeyUp = event?.keyCode == KeyEvent.KEYCODE_ENTER &&
-                    event.action == KeyEvent.ACTION_UP
-                val enterKeyDown = event?.keyCode == KeyEvent.KEYCODE_ENTER &&
-                    event.action == KeyEvent.ACTION_DOWN
-                if (actionId == EditorInfo.IME_ACTION_GO || enterKeyUp) {
+                val decision = omniboxEditorDecision(actionId, event?.keyCode, event?.action)
+                if (decision.submit) {
                     loadFromInput()
-                    true
-                } else {
-                    enterKeyDown
                 }
+                decision.consume
             }
         }
 
@@ -677,9 +672,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun dismissOmniboxKeyboard() {
+        val windowToken = omnibox.windowToken
         omnibox.clearFocus()
-        getSystemService(InputMethodManager::class.java)
-            .hideSoftInputFromWindow(omnibox.windowToken, 0)
+        webView.requestFocus()
+        val inputMethodManager = getSystemService(InputMethodManager::class.java)
+        inputMethodManager.hideSoftInputFromWindow(windowToken, 0)
+        omnibox.post {
+            inputMethodManager.hideSoftInputFromWindow(windowToken, 0)
+        }
     }
 
     private fun loadTarget(target: com.handshake.browser.core.BrowserTarget) {
@@ -1077,4 +1077,21 @@ class MainActivity : ComponentActivity() {
         private val EXTERNAL_VIEW_SCHEMES = setOf("mailto", "tel", "sms", "geo")
         private val SUBFRAME_ALLOWED_SCHEMES = setOf("http", "https", "about", "data", "blob")
     }
+}
+
+internal data class OmniboxEditorDecision(
+    val submit: Boolean,
+    val consume: Boolean,
+)
+
+internal fun omniboxEditorDecision(
+    actionId: Int,
+    keyCode: Int?,
+    keyAction: Int?,
+): OmniboxEditorDecision {
+    val enterKey = keyCode == KeyEvent.KEYCODE_ENTER
+    val submit = actionId == EditorInfo.IME_ACTION_GO ||
+        (enterKey && keyAction == KeyEvent.ACTION_DOWN)
+    val consume = submit || (enterKey && keyAction == KeyEvent.ACTION_UP)
+    return OmniboxEditorDecision(submit = submit, consume = consume)
 }
