@@ -19,7 +19,7 @@ members = [
 [workspace.package]
 edition = "2024"
 version = "0.2.7"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 rust-version = "1.92"
 
 [workspace.dependencies]
