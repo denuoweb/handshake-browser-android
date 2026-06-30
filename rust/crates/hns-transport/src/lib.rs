@@ -178,7 +178,7 @@ struct Http11PoolKey {
 enum PooledHttp11Connection {
     Plain(TcpStream),
     Tls {
-        stream: StreamOwned<ClientConnection, TcpStream>,
+        stream: Box<StreamOwned<ClientConnection, TcpStream>>,
         dane_decision: DaneDecision,
         tls_inspection: Option<TlsCertificateInspection>,
     },
@@ -309,13 +309,13 @@ impl TcpHttpTransport {
     ) -> Result<OriginResponseHead, TransportError> {
         validate_request(request, self.limits)?;
         let key = self.http11_pool_key(request);
-        if let Some(PooledHttp11Connection::Plain(mut stream)) = self.take_http11_connection(&key) {
-            if let Ok((head, reusable)) = self.send_plain_http11(&mut stream, request, body) {
-                if reusable {
-                    self.put_http11_connection(key, PooledHttp11Connection::Plain(stream));
-                }
-                return Ok(head);
+        if let Some(PooledHttp11Connection::Plain(mut stream)) = self.take_http11_connection(&key)
+            && let Ok((head, reusable)) = self.send_plain_http11(&mut stream, request, body)
+        {
+            if reusable {
+                self.put_http11_connection(key, PooledHttp11Connection::Plain(stream));
             }
+            return Ok(head);
         }
 
         let connection_host = request.connect_host.as_deref().unwrap_or(&request.host);
@@ -361,22 +361,21 @@ impl TcpHttpTransport {
             dane_decision,
             tls_inspection,
         }) = self.take_http11_connection(&key)
+            && let Ok((mut head, reusable)) = self.send_tls_http11(stream.as_mut(), request, body)
         {
-            if let Ok((mut head, reusable)) = self.send_tls_http11(&mut stream, request, body) {
-                head.dane_decision = dane_decision.clone();
-                head.tls_inspection = tls_inspection.clone();
-                if reusable {
-                    self.put_http11_connection(
-                        key,
-                        PooledHttp11Connection::Tls {
-                            stream,
-                            dane_decision,
-                            tls_inspection,
-                        },
-                    );
-                }
-                return Ok(head);
+            head.dane_decision = dane_decision.clone();
+            head.tls_inspection = tls_inspection.clone();
+            if reusable {
+                self.put_http11_connection(
+                    key,
+                    PooledHttp11Connection::Tls {
+                        stream,
+                        dane_decision,
+                        tls_inspection,
+                    },
+                );
             }
+            return Ok(head);
         }
 
         let connection_host = request.connect_host.as_deref().unwrap_or(&request.host);
@@ -403,7 +402,7 @@ impl TcpHttpTransport {
             self.put_http11_connection(
                 key,
                 PooledHttp11Connection::Tls {
-                    stream: tls_stream,
+                    stream: Box::new(tls_stream),
                     dane_decision,
                     tls_inspection,
                 },
