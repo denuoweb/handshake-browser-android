@@ -63,6 +63,8 @@ import com.handshake.browser.net.HnsServiceWorkerGatewayClient
 import com.handshake.browser.net.HnsSyncProgress
 import com.handshake.browser.net.HnsSyncForegroundService
 import com.handshake.browser.net.HnsSyncSnapshot
+import com.handshake.browser.net.HnsWebSocketBridge
+import com.handshake.browser.net.HnsWebSocketShim
 import com.handshake.browser.net.HnsWebViewGatewayInterceptor
 import com.handshake.browser.net.HnsWebViewSslErrorPolicy
 import com.handshake.browser.net.LoopbackProxyServer
@@ -107,6 +109,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var syncProgressStats: TextView
     private lateinit var pageProgressBar: ProgressBar
     private lateinit var proxyController: HnsProxyController
+    private lateinit var hnsWebSocketBridge: HnsWebSocketBridge
     private var loopbackProxyServer: LoopbackProxyServer? = null
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var webViewGatewayInterceptor: HnsWebViewGatewayInterceptor
@@ -136,6 +139,12 @@ class MainActivity : ComponentActivity() {
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         GatewayEventLog.configureAppStorage(filesDir)
         proxyController = HnsProxyController(this)
+        hnsWebSocketBridge = HnsWebSocketBridge(
+            dataDir = filesDir,
+            activeMainFrameUrl = { activeMainFrameUrl },
+            strictHnsMode = { HnsResolutionPreferences.strictHnsMode(this) },
+            callbackHandler = mainHandler,
+        )
         webViewGatewayInterceptor = HnsWebViewGatewayInterceptor(
             dataDir = filesDir,
             allowProxyFallbackForBodyRequests = { proxyAvailable },
@@ -214,6 +223,7 @@ class MainActivity : ComponentActivity() {
                 handleDownload(url, userAgent, contentDisposition, mimeType)
             }
         }
+        configureHnsWebSocketBridge()
         configureRendererRecovery()
 
         BrowserCookiePreferences.applyTo(webView)
@@ -310,6 +320,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         activityDestroyed = true
         stopLoopbackGateway()
+        hnsWebSocketBridge.close()
         syncStatusExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -474,6 +485,26 @@ class MainActivity : ComponentActivity() {
         }
         serviceWorkerController.setServiceWorkerClient(
             HnsServiceWorkerGatewayClient(webViewGatewayInterceptor),
+        )
+    }
+
+    private fun configureHnsWebSocketBridge() {
+        if (
+            !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ||
+            !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+        ) {
+            return
+        }
+        WebViewCompat.addWebMessageListener(
+            webView,
+            HnsWebSocketShim.JS_OBJECT_NAME,
+            setOf("*"),
+            hnsWebSocketBridge,
+        )
+        WebViewCompat.addDocumentStartJavaScript(
+            webView,
+            HnsWebSocketShim.script(),
+            setOf("*"),
         )
     }
 
@@ -778,6 +809,7 @@ class MainActivity : ComponentActivity() {
 
     private inner class BrowserClient : WebViewClient() {
         override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+            hnsWebSocketBridge.closeAll()
             pageIsLoading = true
             pageLoadProgress = pageLoadProgress.coerceAtLeast(5)
             omnibox.setText(url)
