@@ -31,7 +31,7 @@ class HnsWebSocketBridge(
     private val callbackHandler: Handler = Handler(Looper.getMainLooper()),
     private val executor: ExecutorService = Executors.newCachedThreadPool(),
 ) : WebViewCompat.WebMessageListener, Closeable {
-    private val sessions = ConcurrentHashMap<Int, NativeHnsWebSocketSession>()
+    private val sessions = ConcurrentHashMap<HnsWebSocketSessionKey, NativeHnsWebSocketSession>()
     private val closed = AtomicBoolean(false)
 
     override fun onPostMessage(
@@ -71,12 +71,13 @@ class HnsWebSocketBridge(
         isMainFrame: Boolean,
         webView: WebView,
     ) {
-        val id = payload.optInt("id", -1)
+        val key = HnsWebSocketSessionKey.fromPayload(payload) ?: return
+        val id = key.id
         if (id < 0) {
             return
         }
         if (sessions.size >= MAX_ACTIVE_SESSIONS) {
-            emitClose(webView, id, CLOSE_ABNORMAL, "too many HNS WebSockets", false)
+            emitClose(webView, key, CLOSE_ABNORMAL, "too many HNS WebSockets", false)
             return
         }
         val target = runCatching {
@@ -87,12 +88,12 @@ class HnsWebSocketBridge(
                 isMainFrame = isMainFrame,
             )
         }.getOrElse { error ->
-            emitError(webView, id, error.message ?: "HNS WebSocket blocked")
-            emitClose(webView, id, CLOSE_ABNORMAL, error.message ?: "HNS WebSocket blocked", false)
+            emitError(webView, key, error.message ?: "HNS WebSocket blocked")
+            emitClose(webView, key, CLOSE_ABNORMAL, error.message ?: "HNS WebSocket blocked", false)
             return
         }
         val session = NativeHnsWebSocketSession(
-            id = id,
+            key = key,
             target = target,
             protocols = payload.optJSONArray("protocols").stringValues(),
             dataDir = dataDir,
@@ -100,17 +101,17 @@ class HnsWebSocketBridge(
             hnsGatewayBridge = hnsGatewayBridge,
             executor = executor,
             emit = { event -> emit(webView, event) },
-            onFinished = { sessions.remove(id) },
+            onFinished = { sessions.remove(key) },
         )
-        if (sessions.putIfAbsent(id, session) != null) {
-            emitClose(webView, id, CLOSE_ABNORMAL, "duplicate HNS WebSocket id", false)
+        if (sessions.putIfAbsent(key, session) != null) {
+            emitClose(webView, key, CLOSE_ABNORMAL, "duplicate HNS WebSocket id", false)
             return
         }
         session.start()
     }
 
     private fun sendSessionPayload(payload: JSONObject) {
-        val session = sessions[payload.optInt("id", -1)] ?: return
+        val session = sessions[HnsWebSocketSessionKey.fromPayload(payload)] ?: return
         when (payload.optString("dataType")) {
             "text" -> session.sendText(payload.optString("data", ""))
             "binary" -> session.sendBinary(
@@ -122,8 +123,7 @@ class HnsWebSocketBridge(
     }
 
     private fun closeSession(payload: JSONObject) {
-        val id = payload.optInt("id", -1)
-        sessions[id]?.close(
+        sessions[HnsWebSocketSessionKey.fromPayload(payload)]?.close(
             code = payload.optInt("code", CLOSE_NORMAL),
             reason = payload.optString("reason", ""),
         )
@@ -136,16 +136,14 @@ class HnsWebSocketBridge(
         }
     }
 
-    private fun emitError(webView: WebView, id: Int, reason: String) {
-        emit(webView, JSONObject().put("id", id).put("event", "error").put("reason", reason))
+    private fun emitError(webView: WebView, key: HnsWebSocketSessionKey, reason: String) {
+        emit(webView, key.event("error").put("reason", reason))
     }
 
-    private fun emitClose(webView: WebView, id: Int, code: Int, reason: String, wasClean: Boolean) {
+    private fun emitClose(webView: WebView, key: HnsWebSocketSessionKey, code: Int, reason: String, wasClean: Boolean) {
         emit(
             webView,
-            JSONObject()
-                .put("id", id)
-                .put("event", "close")
+            key.event("close")
                 .put("code", code)
                 .put("reason", reason)
                 .put("wasClean", wasClean),
@@ -160,8 +158,27 @@ class HnsWebSocketBridge(
     }
 }
 
+private data class HnsWebSocketSessionKey(
+    val pageId: String,
+    val id: Int,
+) {
+    fun event(name: String): JSONObject =
+        JSONObject()
+            .put("pageId", pageId)
+            .put("id", id)
+            .put("event", name)
+
+    companion object {
+        fun fromPayload(payload: JSONObject): HnsWebSocketSessionKey? {
+            val pageId = payload.optString("pageId").trim().takeIf { it.isNotBlank() } ?: return null
+            val id = payload.optInt("id", -1).takeIf { it >= 0 } ?: return null
+            return HnsWebSocketSessionKey(pageId, id)
+        }
+    }
+}
+
 private class NativeHnsWebSocketSession(
-    private val id: Int,
+    private val key: HnsWebSocketSessionKey,
     private val target: HnsWebSocketTarget,
     private val protocols: List<String>,
     private val dataDir: File,
@@ -261,9 +278,7 @@ private class NativeHnsWebSocketSession(
         }
         opened = true
         emit(
-            JSONObject()
-                .put("id", id)
-                .put("event", "open")
+            key.event("open")
                 .put("protocol", response.header("Sec-WebSocket-Protocol").orEmpty()),
         )
     }
@@ -309,7 +324,8 @@ private class NativeHnsWebSocketSession(
 
     private fun emitMessage(opcode: Int, payload: ByteArray) {
         val event = JSONObject()
-            .put("id", id)
+            .put("pageId", key.pageId)
+            .put("id", key.id)
             .put("event", "message")
         if (opcode == HnsWebSocketFrameCodec.OPCODE_TEXT) {
             event.put("dataType", "text")
@@ -325,7 +341,7 @@ private class NativeHnsWebSocketSession(
         if (finished.get()) {
             return
         }
-        emit(JSONObject().put("id", id).put("event", "error").put("reason", reason))
+        emit(key.event("error").put("reason", reason))
         finishClose(HnsWebSocketBridge.CLOSE_ABNORMAL, reason, false)
     }
 
@@ -340,9 +356,7 @@ private class NativeHnsWebSocketSession(
             }
         }
         emit(
-            JSONObject()
-                .put("id", id)
-                .put("event", "close")
+            key.event("close")
                 .put("code", code)
                 .put("reason", reason)
                 .put("wasClean", wasClean),

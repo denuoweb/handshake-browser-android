@@ -23,6 +23,7 @@ internal object HnsWebSocketShim {
   var CLOSING = 2;
   var CLOSED = 3;
   var sockets = Object.create(null);
+  var pageId = String(Date.now()) + '-' + String(Math.random()).slice(2);
   var nextId = 1;
   var icannTlds = new Set([$icannTlds]);
   var reservedSingleLabels = new Set(['example', 'invalid', 'local', 'localhost', 'test']);
@@ -139,7 +140,7 @@ internal object HnsWebSocketShim {
     this.__listeners = Object.create(null);
     this.__id = nextId++;
     sockets[this.__id] = this;
-    post({ type: 'open', id: this.__id, url: url, protocols: protocolList(protocols) });
+    post({ type: 'open', pageId: pageId, id: this.__id, url: url, protocols: protocolList(protocols) });
   }
 
   HnsNativeWebSocket.prototype.addEventListener = function(type, listener) {
@@ -169,13 +170,13 @@ internal object HnsWebSocketShim {
     if (this.readyState !== OPEN) return;
     if (typeof data === 'string') {
       this.bufferedAmount += data.length;
-      post({ type: 'send', id: this.__id, dataType: 'text', data: data });
+      post({ type: 'send', pageId: pageId, id: this.__id, dataType: 'text', data: data });
       return;
     }
     if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
       var buffer = data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
       this.bufferedAmount += buffer.byteLength;
-      post({ type: 'send', id: this.__id, dataType: 'binary', data: arrayBufferToBase64(buffer) });
+      post({ type: 'send', pageId: pageId, id: this.__id, dataType: 'binary', data: arrayBufferToBase64(buffer) });
       return;
     }
     if (typeof Blob !== 'undefined' && data instanceof Blob) {
@@ -183,12 +184,12 @@ internal object HnsWebSocketShim {
       this.bufferedAmount += data.size;
       data.arrayBuffer().then(function(buffer) {
         if (socket.readyState === OPEN) {
-          post({ type: 'send', id: socket.__id, dataType: 'binary', data: arrayBufferToBase64(buffer) });
+          post({ type: 'send', pageId: pageId, id: socket.__id, dataType: 'binary', data: arrayBufferToBase64(buffer) });
         }
       });
       return;
     }
-    post({ type: 'send', id: this.__id, dataType: 'text', data: String(data) });
+    post({ type: 'send', pageId: pageId, id: this.__id, dataType: 'text', data: String(data) });
   };
 
   HnsNativeWebSocket.prototype.close = function(code, reason) {
@@ -201,7 +202,7 @@ internal object HnsWebSocketShim {
       throw new DOMException('WebSocket close reason is too long.', 'SyntaxError');
     }
     this.readyState = CLOSING;
-    post({ type: 'close', id: this.__id, code: code || 1000, reason: reason });
+    post({ type: 'close', pageId: pageId, id: this.__id, code: code || 1000, reason: reason });
   };
 
   HnsNativeWebSocket.prototype.__handleBridgeEvent = function(message) {
@@ -257,6 +258,7 @@ internal object HnsWebSocketShim {
   var onBridgeMessage = function(event) {
     var message;
     try { message = JSON.parse(event.data); } catch (error) { return; }
+    if (message.pageId !== pageId) return;
     var socket = sockets[message.id];
     if (socket) socket.__handleBridgeEvent(message);
   };
