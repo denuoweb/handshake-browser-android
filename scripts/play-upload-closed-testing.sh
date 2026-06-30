@@ -9,8 +9,8 @@ fi
 package_name="${PLAY_PACKAGE:-com.handshake.browser}"
 track_name="${PLAY_TRACK:-alpha}"
 release_status="${PLAY_RELEASE_STATUS:-completed}"
-aab_path="${1:-dist/play-store/hns-browser-v0.2.1-play-upload-signed.aab}"
-release_name="${PLAY_RELEASE_NAME:-HNS Browser 0.2.1}"
+aab_path="${1:-dist/play-store/hns-browser-v0.2.2-play-upload-signed.aab}"
+release_name="${PLAY_RELEASE_NAME:-HNS Browser 0.2.2}"
 release_notes="${PLAY_RELEASE_NOTES:-Production cleanup and HNS resolver reliability fixes for closed testing.}"
 
 if [[ ! -f "$aab_path" ]]; then

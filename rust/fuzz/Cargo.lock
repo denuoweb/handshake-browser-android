@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "hns-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake2",
  "hex",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "hns-dane"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "sha2",
  "thiserror",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "hns-p2p"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "hns-core",
  "hns-urkel",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "hns-urkel"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "hns-core",
  "thiserror",
