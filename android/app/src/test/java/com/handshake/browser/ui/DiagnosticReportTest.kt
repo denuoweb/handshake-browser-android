@@ -8,8 +8,8 @@ class DiagnosticReportTest {
     @Test
     fun markdownIncludesOperationalFieldsAndEscapesCodeFences() {
         val report = DiagnosticReport.markdown(
-            buildLabel = "debug 0.2.3 (14)",
-            rustCore = "hns-browser-rust-core/0.2.3",
+            buildLabel = "debug 0.2.4 (15)",
+            rustCore = "hns-browser-rust-core/0.2.4",
             rustDiagnostics = """{"securityDefault":"fail-closed","note":"```"}""",
             syncStatus = """{"status":"up_to_date","bestHeight":1}""",
             proxyOverrideSupported = true,
@@ -20,8 +20,8 @@ class DiagnosticReportTest {
 
         assertTrue(report.contains("# HNS Browser Diagnostic Bundle"))
         assertTrue(report.contains("Generated: 1970-01-01T00:00:00Z"))
-        assertTrue(report.contains("Build: debug 0.2.3 (14)"))
-        assertTrue(report.contains("Rust core: hns-browser-rust-core/0.2.3"))
+        assertTrue(report.contains("Build: debug 0.2.4 (15)"))
+        assertTrue(report.contains("Rust core: hns-browser-rust-core/0.2.4"))
         assertTrue(report.contains("Proxy override supported: true"))
         assertTrue(report.contains("""{"status":"up_to_date","bestHeight":1}"""))
         assertTrue(report.contains("123 native_response welcome 502 HNS_Nameserver_Unavailable"))

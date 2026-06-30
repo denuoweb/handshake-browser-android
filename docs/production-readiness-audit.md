@@ -31,7 +31,7 @@ This audit treats the app as a Play Store closed-testing candidate and checks th
 
 ## Remaining Non-Code Work
 
-- Upload `dist/play-store/hns-browser-v0.2.3-play-upload-signed.aab` to the closed testing track in Play Console.
+- Upload `dist/play-store/hns-browser-v0.2.4-play-upload-signed.aab` to the closed testing track in Play Console.
 - Complete the Foreground service declaration with the short sync demo video.
 - Complete Data safety, App access, Content rating, Target audience, Ads, and Privacy policy declarations using `docs/play-store-readiness.md`.
 - Add at least 12 opted-in testers and keep closed testing active for the required period if Google applies the new personal-account production-access rule.

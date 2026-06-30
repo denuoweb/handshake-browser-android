@@ -1205,7 +1205,7 @@ fn build_http2_request(request: &OriginRequest) -> Result<Http2Request<()>, Tran
         let headers = h2_request.headers_mut();
         headers.insert(
             HeaderName::from_static("user-agent"),
-            HeaderValue::from_static("hns-browser/0.2.3"),
+            HeaderValue::from_static("hns-browser/0.2.4"),
         );
         headers.insert(
             HeaderName::from_static("accept"),
@@ -1367,7 +1367,7 @@ fn build_http_request(
     let mut out = Vec::new();
     write!(
         out,
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: hns-browser/0.2.3\r\nAccept: */*\r\n",
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: hns-browser/0.2.4\r\nAccept: */*\r\n",
         request.method.to_ascii_uppercase(),
         request.path_and_query,
         host_header(&request.host, request.port, &request.scheme),
@@ -1404,7 +1404,7 @@ fn build_http_upgrade_request(request: &OriginRequest) -> Result<Vec<u8>, Transp
     let mut out = Vec::new();
     write!(
         out,
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: hns-browser/0.2.3\r\nAccept: */*\r\n",
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: hns-browser/0.2.4\r\nAccept: */*\r\n",
         request.method.to_ascii_uppercase(),
         request.path_and_query,
         host_header(&request.host, request.port, &request.scheme),

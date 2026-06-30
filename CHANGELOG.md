@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.4 - 2026-06-30
+
+### Changed
+
+- Audited the bundled HNS homepage with resolver trace, HNS proof, TLSA, and DANE checks; removed non-working entries and added Denuo Web as a core direct-authoritative HNS site.
+- Updated Denuo Web infrastructure to advertise HTTP/3 through DNS HTTPS records and showcase HTTP/3 plus WebSocket echo support.
+
+### Fixed
+
+- Kept regular origin HTTP reads on the normal response timeout instead of the shorter tunnel idle timeout.
+- Avoided stale DoH transport promotion state across Android resolver fallback queries.
+- Submitted omnibox Enter on key-down and forced focus back to WebView so the keyboard closes reliably.
+
 ## 0.2.3 - 2026-06-30
 
 ### Security
