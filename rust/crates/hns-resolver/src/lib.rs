@@ -86,6 +86,8 @@ pub enum ResolverError {
     ProofNameMismatch,
     #[error("HNS name does not exist")]
     NameNotFound,
+    #[error("local HNS chain is not current enough to determine current name state")]
+    LocalChainNotCurrent,
     #[error("DNSSEC validation failed")]
     DnssecFailed,
     #[error("HNS resource payload is invalid: {0}")]

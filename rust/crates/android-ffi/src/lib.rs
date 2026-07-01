@@ -61,6 +61,7 @@ const ANDROID_MIN_PEER_TARGET: usize = 64;
 const ANDROID_PEER_HEIGHT_REFRESH_INTERVAL_SECONDS: u64 = 10 * 60;
 const MAINNET_GENESIS_TIME: u64 = 1_580_745_078;
 const MAINNET_TARGET_SPACING_SECONDS: u64 = 10 * 60;
+const LOCAL_CHAIN_CURRENTNESS_ALLOWED_LAG: u32 = RESOURCE_PROOF_CACHE_CANONICAL_WINDOW;
 const HNS_DOH_HOST: &str = "hnsdoh.com";
 const HNS_DOH_PATH: &str = "/dns-query";
 const HNS_GATEWAY_STRICT_MODE_HEADER: &str = "X-HNS-Browser-Strict-Mode";
@@ -245,8 +246,12 @@ impl GatewayProofProvider {
         if verified.root_name != root_name || verified.name_hash != name_hash || !verified.secure {
             return Err(ResolverError::ProofNameMismatch);
         }
+        let is_non_inclusion = verified.value.is_none();
         if !self.anchor_is_recent_canonical(verified.anchor)? {
             return Err(ResolverError::ProofUnavailable);
+        }
+        if is_non_inclusion && local_chain_is_stale_for_current_resolution(&self.base)? {
+            return Err(ResolverError::LocalChainNotCurrent);
         }
         ProvenNameRecords::from_verified_resource_value(verified)
     }
@@ -697,6 +702,7 @@ impl Resolver for HnsDohResolver {
 fn doh_fallback_reason(error: &ResolverError) -> Option<&'static str> {
     match error {
         ResolverError::ProofUnavailable => Some("local_hns_proof_unavailable"),
+        ResolverError::LocalChainNotCurrent => Some("local_chain_not_current"),
         ResolverError::NoNameserverAddress => Some("no_verified_nameserver_address"),
         ResolverError::DnsTransport(_) => Some("authoritative_nameserver_transport_failed"),
         ResolverError::InvalidDnsResponse => Some("authoritative_nameserver_invalid_response"),
@@ -1530,13 +1536,7 @@ fn resolution_trace_json(
                 .any(|record| matches!(record.record_type, RecordType::A | RecordType::Aaaa))
         })
         .unwrap_or(false);
-    let hns_proof = match (resolution, error) {
-        (Some(answer), _) if answer.secure => "verified",
-        (_, Some(GatewayError::Resolver(ResolverError::ProofUnavailable))) => "unavailable",
-        (_, Some(GatewayError::Resolver(ResolverError::NameNotFound))) => "not_found",
-        (_, Some(GatewayError::Resolver(ResolverError::ProofNameMismatch))) => "failed",
-        _ => "unknown",
-    };
+    let hns_proof = hns_proof_trace_status(input, resolution, error);
     let fallback_reason = fallback_marker.reason().unwrap_or("none");
     let fallback_type = if fallback_marker.used() {
         r#""HNS_DOH""#
@@ -1553,14 +1553,25 @@ fn resolution_trace_json(
         .unwrap_or_else(|| "null".to_owned());
     let authoritative_dns = authoritative_dns_trace_json(&dns_events);
     let dns_attempts = dns_trace_attempts_json(&dns_events);
+    let local_currentness = local_chain_currentness_for_trace(input.data_dir);
+    let local_best_height =
+        optional_u32_json(local_currentness.and_then(|value| value.best_height));
+    let target_height = optional_u32_json(local_currentness.and_then(|value| value.target_height));
+    let estimated_tip_height =
+        optional_u32_json(local_currentness.and_then(|value| value.estimated_tip_height));
+    let local_chain_stale = optional_bool_json(local_currentness.and_then(|value| value.stale));
 
     format!(
-        r#"{{"host":"{}","url":"{}","root":"{}","mode":"{}","hnsProof":"{}","delegation":{},"resourceRecords":[{}],"nameserverCandidates":{},"authoritativeDns":{},"dnssec":"{}","originAddress":"{}","tls":{},"fallback":{{"used":{},"type":{},"reason":{}}},"dnsAttempts":[{}],"finalError":{}}}"#,
+        r#"{{"host":"{}","url":"{}","root":"{}","mode":"{}","hnsProof":"{}","localBestHeight":{},"targetHeight":{},"estimatedTargetHeight":{},"localChainStale":{},"delegation":{},"resourceRecords":[{}],"nameserverCandidates":{},"authoritativeDns":{},"dnssec":"{}","originAddress":"{}","tls":{},"fallback":{{"used":{},"type":{},"reason":{}}},"dnsAttempts":[{}],"finalError":{}}}"#,
         json_escape(input.host),
         json_escape(&gateway_request_address(input)),
         json_escape(&hns_trace_root(input.host)),
         mode.as_str(),
         hns_proof,
+        local_best_height,
+        target_height,
+        estimated_tip_height,
+        local_chain_stale,
         delegation,
         resource_types,
         nameserver_candidates_json(&dns_events),
@@ -1574,6 +1585,64 @@ fn resolution_trace_json(
         dns_attempts,
         final_error,
     )
+}
+
+fn hns_proof_trace_status(
+    input: &GatewayHttpRequestInput<'_>,
+    resolution: Option<&ResolutionAnswer>,
+    error: Option<&GatewayError>,
+) -> &'static str {
+    match (resolution, error) {
+        (Some(answer), _) if answer.secure => "verified",
+        (_, Some(GatewayError::Resolver(ResolverError::ProofUnavailable))) => "unavailable",
+        (_, Some(GatewayError::Resolver(ResolverError::NameNotFound))) => "not_found",
+        (_, Some(GatewayError::Resolver(ResolverError::LocalChainNotCurrent))) => "stale",
+        (_, Some(GatewayError::Resolver(ResolverError::ProofNameMismatch))) => "failed",
+        _ => hns_cached_proof_trace_status(input.data_dir, input.host).unwrap_or("unknown"),
+    }
+}
+
+fn hns_cached_proof_trace_status(data_dir: &str, host: &str) -> Option<&'static str> {
+    let (_, root_name) = hns_proof_host_and_root(host).ok()?;
+    let name_hash = NameHash::from_name(&root_name).ok()?;
+    let resources_path = Path::new(data_dir).join("hns").join("resources.sqlite");
+    if !resources_path.exists() {
+        return Some("unavailable");
+    }
+    let provider = SqliteResourceValueProvider::open(resources_path).ok()?;
+    match provider.prove_resource_value(&root_name, name_hash) {
+        Ok(verified) if !verified.secure => Some("failed"),
+        Ok(verified) if verified.value.is_some() => Some("verified"),
+        Ok(_)
+            if local_chain_currentness_for_trace(data_dir)
+                .and_then(|currentness| currentness.stale)
+                .unwrap_or(false) =>
+        {
+            Some("stale")
+        }
+        Ok(_) => Some("not_found"),
+        Err(ResolverError::ProofUnavailable) => Some("unavailable"),
+        Err(ResolverError::ProofNameMismatch) => Some("failed"),
+        Err(_) => None,
+    }
+}
+
+fn local_chain_currentness_for_trace(data_dir: &str) -> Option<LocalChainCurrentness> {
+    local_chain_currentness(&Path::new(data_dir).join("hns")).ok()
+}
+
+fn optional_u32_json(value: Option<u32>) -> String {
+    value
+        .map(|height| height.to_string())
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn optional_bool_json(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "null",
+    }
 }
 
 fn authoritative_dns_trace_json(events: &[DnsTraceEvent]) -> String {
@@ -2226,6 +2295,11 @@ fn map_gateway_error(error: &GatewayError) -> (u16, &'static str, &'static str) 
             "HNS Name Not Found",
             "A verified HNS non-inclusion proof says this name does not exist.",
         ),
+        GatewayError::Resolver(ResolverError::LocalChainNotCurrent) => (
+            503,
+            "HNS Sync Incomplete",
+            "The local HNS chain is not current enough to determine this name's current state.",
+        ),
         GatewayError::Resolver(ResolverError::NoNameserverAddress) => (
             502,
             "HNS Nameserver Unavailable",
@@ -2747,6 +2821,60 @@ fn best_peer_height(peers: &hns_p2p::PeerManager) -> Option<u32> {
         .map(|peer| peer.last_height.0)
         .filter(|height| *height > 0)
         .max()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalChainCurrentness {
+    best_height: Option<u32>,
+    target_height: Option<u32>,
+    estimated_tip_height: Option<u32>,
+    stale: Option<bool>,
+}
+
+impl LocalChainCurrentness {
+    fn new(
+        best_height: Option<u32>,
+        target_height: Option<u32>,
+        estimated_tip_height: Option<u32>,
+    ) -> Self {
+        let current_target = target_height.or(estimated_tip_height);
+        let stale = match (best_height, current_target) {
+            (Some(best), Some(target)) => {
+                Some(target.saturating_sub(best) > LOCAL_CHAIN_CURRENTNESS_ALLOWED_LAG)
+            }
+            _ => None,
+        };
+        Self {
+            best_height,
+            target_height,
+            estimated_tip_height,
+            stale,
+        }
+    }
+}
+
+fn local_chain_is_stale_for_current_resolution(base: &Path) -> Result<bool, ResolverError> {
+    Ok(local_chain_currentness(base)?.stale.unwrap_or(false))
+}
+
+fn local_chain_currentness(base: &Path) -> Result<LocalChainCurrentness, ResolverError> {
+    let header_store = SqliteHeaderStore::open(base.join("headers.sqlite"))
+        .map_err(|error| ResolverError::Storage(format!("open header store: {error}")))?;
+    let chain = HeaderChain::new(header_store);
+    let best_height = chain
+        .best_header()
+        .map_err(|error| ResolverError::Storage(format!("read best header: {error}")))?
+        .map(|header| header.height.0);
+    let peer_store = SqlitePeerStore::open(base.join("peers.sqlite"))
+        .map_err(|error| ResolverError::Storage(format!("open peer store: {error}")))?;
+    let peers = peer_store
+        .load_manager()
+        .map_err(|error| ResolverError::Storage(format!("load peer store: {error}")))?;
+    Ok(LocalChainCurrentness::new(
+        best_height,
+        best_peer_height(&peers),
+        estimated_mainnet_tip_height(now_unix_seconds()),
+    ))
 }
 
 fn select_live_proof_peers(
@@ -4117,6 +4245,93 @@ mod tests {
     }
 
     #[test]
+    fn resolution_trace_reports_cached_hns_proof_when_later_resolution_fails() {
+        let path = temp_dir_path("trace-cached-proof-after-resolution-failure");
+        let base = path.join("hns");
+        std::fs::create_dir_all(&base).unwrap();
+        let resources = SqliteResourceValueProvider::open(base.join("resources.sqlite")).unwrap();
+        let root_name = "welcome".to_owned();
+        let name_hash = NameHash::from_name(&root_name).unwrap();
+        resources
+            .insert(VerifiedResourceValue::inclusion(
+                root_name.clone(),
+                name_hash,
+                owner_glue4_resource(&root_name, [127, 0, 0, 1]),
+            ))
+            .unwrap();
+
+        let trace = resolution_trace_json(
+            &GatewayHttpRequestInput {
+                data_dir: path.to_str().unwrap(),
+                method: "GET",
+                scheme: "https",
+                host: "www.welcome",
+                port: 443,
+                path_and_query: "/",
+                header_text: "",
+                body: &[],
+            },
+            GatewayResolutionMode::Strict,
+            None,
+            TlsTraceInput::default(),
+            Some(&GatewayError::Resolver(ResolverError::DnsTransport(
+                "operation timed out".to_owned(),
+            ))),
+            &FallbackMarker::default(),
+            &DnsTraceRecorder::default(),
+        );
+
+        assert!(trace.contains(r#""root":"welcome""#));
+        assert!(trace.contains(r#""hnsProof":"verified""#));
+        cleanup_dir(&path);
+    }
+
+    #[test]
+    fn resolution_trace_reports_stale_chain_fallback_reason_and_heights() {
+        let path = temp_dir_path("trace-stale-chain-fallback");
+        let base = path.join("hns");
+        std::fs::create_dir_all(&base).unwrap();
+        let proof_root = Hash::new([12; 32]);
+        let proof_height = store_best_header_with_tree_root(&base, proof_root);
+        let target_height = proof_height.0 + LOCAL_CHAIN_CURRENTNESS_ALLOWED_LAG + 2;
+        store_peer_height(&base, target_height);
+        let marker = FallbackMarker::default();
+        marker.mark("local_chain_not_current");
+
+        let trace = resolution_trace_json(
+            &GatewayHttpRequestInput {
+                data_dir: path.to_str().unwrap(),
+                method: "GET",
+                scheme: "https",
+                host: "future",
+                port: 443,
+                path_and_query: "/",
+                header_text: "",
+                body: &[],
+            },
+            GatewayResolutionMode::Compatibility,
+            None,
+            TlsTraceInput::default(),
+            Some(&GatewayError::Resolver(ResolverError::LocalChainNotCurrent)),
+            &marker,
+            &DnsTraceRecorder::default(),
+        );
+
+        assert!(trace.contains(r#""hnsProof":"stale""#));
+        assert!(trace.contains(&format!(r#""localBestHeight":{}"#, proof_height.0)));
+        assert!(trace.contains(&format!(r#""targetHeight":{}"#, target_height)));
+        assert!(trace.contains(r#""estimatedTargetHeight":"#));
+        assert!(trace.contains(r#""localChainStale":true"#));
+        assert!(trace.contains(
+            r#""fallback":{"used":true,"type":"HNS_DOH","reason":"local_chain_not_current"}"#
+        ));
+        assert!(trace.contains(
+            r#""finalError":"resolver error: local HNS chain is not current enough to determine current name state""#
+        ));
+        cleanup_dir(&path);
+    }
+
+    #[test]
     fn resolution_trace_marks_authoritative_dns_as_delegated() {
         let dns_trace = DnsTraceRecorder::default();
         dns_trace.push(DnsTraceEvent {
@@ -4287,6 +4502,167 @@ mod tests {
             answer,
         );
         assert_eq!(marker.reason(), Some("local_hns_proof_unavailable"));
+    }
+
+    #[test]
+    fn compatibility_fallback_uses_doh_on_stale_cached_non_inclusion() {
+        let path = temp_dir_path("stale-negative-compat-fallback");
+        let base = path.join("hns");
+        std::fs::create_dir_all(&base).unwrap();
+        let resources = SqliteResourceValueProvider::open(base.join("resources.sqlite")).unwrap();
+        let root_name = "future".to_owned();
+        let name_hash = NameHash::from_name(&root_name).unwrap();
+        let proof_root = Hash::new([9; 32]);
+        let proof_height = store_best_header_with_tree_root(&base, proof_root);
+        let target_height = proof_height.0 + LOCAL_CHAIN_CURRENTNESS_ALLOWED_LAG + 1;
+        store_peer_height(&base, target_height);
+        resources
+            .insert(
+                VerifiedResourceValue::non_inclusion(root_name.clone(), name_hash)
+                    .with_anchor(proof_root, proof_height),
+            )
+            .unwrap();
+        let marker = FallbackMarker::default();
+        let fallback_answer = ResolutionAnswer {
+            name: DnsName::from_ascii(&root_name).unwrap(),
+            records: vec![address_record(&root_name, [203, 0, 113, 8])],
+            secure: true,
+        };
+        let primary = DelegatingResolver::new(
+            GatewayProofProvider::new(base.clone(), resources),
+            TestResolver::error(|| ResolverError::ProofUnavailable),
+        );
+        let resolver = FallbackResolver::with_marker(
+            primary,
+            TestResolver::answer(fallback_answer.clone()),
+            marker.clone(),
+        );
+
+        let resolved = resolver
+            .resolve(&ResolutionRequest {
+                qname: root_name,
+                qtype: RecordType::A.code(),
+            })
+            .unwrap();
+
+        assert_eq!(resolved, fallback_answer);
+        assert_eq!(marker.reason(), Some("local_chain_not_current"));
+        cleanup_dir(&path);
+    }
+
+    #[test]
+    fn compatibility_fallback_keeps_current_non_inclusion_as_name_not_found() {
+        let path = temp_dir_path("current-negative-no-fallback");
+        let base = path.join("hns");
+        std::fs::create_dir_all(&base).unwrap();
+        let resources = SqliteResourceValueProvider::open(base.join("resources.sqlite")).unwrap();
+        let root_name = "missing".to_owned();
+        let name_hash = NameHash::from_name(&root_name).unwrap();
+        let proof_root = Hash::new([10; 32]);
+        let proof_height = store_best_header_with_tree_root(&base, proof_root);
+        store_peer_height(&base, proof_height.0 + LOCAL_CHAIN_CURRENTNESS_ALLOWED_LAG);
+        resources
+            .insert(
+                VerifiedResourceValue::non_inclusion(root_name.clone(), name_hash)
+                    .with_anchor(proof_root, proof_height),
+            )
+            .unwrap();
+        let marker = FallbackMarker::default();
+        let fallback_answer = ResolutionAnswer {
+            name: DnsName::from_ascii(&root_name).unwrap(),
+            records: vec![address_record(&root_name, [203, 0, 113, 9])],
+            secure: true,
+        };
+        let primary = DelegatingResolver::new(
+            GatewayProofProvider::new(base.clone(), resources),
+            TestResolver::error(|| ResolverError::ProofUnavailable),
+        );
+        let resolver = FallbackResolver::with_marker(
+            primary,
+            TestResolver::answer(fallback_answer),
+            marker.clone(),
+        );
+
+        let error = resolver
+            .resolve(&ResolutionRequest {
+                qname: root_name,
+                qtype: RecordType::A.code(),
+            })
+            .unwrap_err();
+
+        assert_eq!(error, ResolverError::NameNotFound);
+        assert!(!marker.used());
+        assert_eq!(marker.reason(), None);
+        cleanup_dir(&path);
+    }
+
+    #[test]
+    fn strict_resolver_reports_stale_cached_non_inclusion_without_fallback() {
+        let path = temp_dir_path("stale-negative-strict");
+        let base = path.join("hns");
+        std::fs::create_dir_all(&base).unwrap();
+        let resources = SqliteResourceValueProvider::open(base.join("resources.sqlite")).unwrap();
+        let root_name = "future-strict".to_owned();
+        let name_hash = NameHash::from_name(&root_name).unwrap();
+        let proof_root = Hash::new([11; 32]);
+        let proof_height = store_best_header_with_tree_root(&base, proof_root);
+        store_peer_height(
+            &base,
+            proof_height.0 + LOCAL_CHAIN_CURRENTNESS_ALLOWED_LAG + 25,
+        );
+        resources
+            .insert(
+                VerifiedResourceValue::non_inclusion(root_name.clone(), name_hash)
+                    .with_anchor(proof_root, proof_height),
+            )
+            .unwrap();
+        let resolver = DelegatingResolver::new(
+            GatewayProofProvider::new(base.clone(), resources),
+            TestResolver::error(|| ResolverError::ProofUnavailable),
+        );
+
+        let error = resolver
+            .resolve(&ResolutionRequest {
+                qname: root_name,
+                qtype: RecordType::A.code(),
+            })
+            .unwrap_err();
+
+        assert_eq!(error, ResolverError::LocalChainNotCurrent);
+        assert_eq!(
+            map_gateway_error(&GatewayError::Resolver(error)),
+            (
+                503,
+                "HNS Sync Incomplete",
+                "The local HNS chain is not current enough to determine this name's current state.",
+            ),
+        );
+        cleanup_dir(&path);
+    }
+
+    #[test]
+    fn fallback_resolver_does_not_use_doh_on_name_not_found() {
+        let marker = FallbackMarker::default();
+        let answer = ResolutionAnswer {
+            name: DnsName::from_ascii("missing").unwrap(),
+            records: vec![address_record("missing", [203, 0, 113, 10])],
+            secure: true,
+        };
+        let resolver = FallbackResolver::with_marker(
+            TestResolver::error(|| ResolverError::NameNotFound),
+            TestResolver::answer(answer),
+            marker.clone(),
+        );
+
+        let error = resolver
+            .resolve(&ResolutionRequest {
+                qname: "missing".to_owned(),
+                qtype: RecordType::A.code(),
+            })
+            .unwrap_err();
+
+        assert_eq!(error, ResolverError::NameNotFound);
+        assert!(!marker.used());
     }
 
     #[test]
@@ -4870,6 +5246,15 @@ mod tests {
             .last()
             .copied()
             .unwrap()
+    }
+
+    fn store_peer_height(base: &std::path::Path, height: u32) {
+        let address = "127.0.0.1:8333".parse().unwrap();
+        let peer_store = SqlitePeerStore::open(base.join("peers.sqlite")).unwrap();
+        let mut peers = PeerManager::default();
+        peers.seed([address]);
+        peers.record_observed_height(address, Height(height), now_unix_seconds());
+        peer_store.save_manager(&peers).unwrap();
     }
 
     fn store_canonical_headers_with_tree_roots(

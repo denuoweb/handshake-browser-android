@@ -65,6 +65,10 @@ class HnsResolverTraceActivity : ComponentActivity() {
             appendLine("Root: ${trace.optString("root", "unknown")}")
             appendLine("Mode: ${trace.optString("mode", "unknown")}")
             appendLine("HNS proof: ${trace.optString("hnsProof", "unknown")}")
+            appendLine("Local best height: ${nullableTraceValue(trace, "localBestHeight")}")
+            appendLine("Target height: ${nullableTraceValue(trace, "targetHeight")}")
+            appendLine("Estimated target height: ${nullableTraceValue(trace, "estimatedTargetHeight")}")
+            appendLine("Local chain stale: ${nullableTraceValue(trace, "localChainStale")}")
             appendLine("Delegation: ${if (trace.optBoolean("delegation", false)) "yes" else "no"}")
             appendLine("Resource records: ${trace.optJSONArray("resourceRecords")?.join(", ") ?: "unknown"}")
             appendLine("Nameserver candidates: ${trace.optJSONArray("nameserverCandidates")?.join(", ") ?: "unknown"}")
@@ -83,6 +87,13 @@ class HnsResolverTraceActivity : ComponentActivity() {
             appendLine(suggestedFix(trace))
         }
     }
+
+    private fun nullableTraceValue(trace: JSONObject, key: String): String =
+        if (!trace.has(key) || trace.isNull(key)) {
+            "unknown"
+        } else {
+            trace.opt(key)?.toString() ?: "unknown"
+        }
 
     private fun dnsAttemptsSummary(trace: JSONObject): String {
         val attempts = trace.optJSONArray("dnsAttempts") ?: return "none"
@@ -112,6 +123,8 @@ class HnsResolverTraceActivity : ComponentActivity() {
         val fallback = trace.optJSONObject("fallback")
         val nameserverCandidates = trace.optJSONArray("nameserverCandidates")
         return when {
+            hnsProof == "stale" || trace.optBoolean("localChainStale", false) ->
+                "Let HNS sync catch up, then retry. The local proof is valid for its historical block, but not current enough to decide whether the name exists now."
             hnsProof == "unavailable" || hnsProof == "unknown" ->
                 "Sync headers/proofs first, then retry. No verified HNS proof was available."
             nameserverCandidates == null || nameserverCandidates.length() == 0 ->
